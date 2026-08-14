@@ -26,6 +26,9 @@ import { handleDiscoverUi } from './tools/discover-ui.js';
 import { handleUseFlowTool } from './tools/use-flow-tool.js';
 import { handleGetSettings } from './tools/get-settings.js';
 import { handleChangeSettings } from './tools/change-settings.js';
+import { handleListGenerations } from './tools/list-generations.js';
+import { handleOpenGeneration } from './tools/open-generation.js';
+import { handleEditGeneration } from './tools/edit-generation.js';
 import { jobQueue } from './queue/job-queue.js';
 import { takeScreenshot } from './utils/screenshots.js';
 import fs from 'fs';
@@ -77,7 +80,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_generate_image',
-    description: 'WARNING: image generation SPENDS CREDITS. Default (auto_confirm=false): fills the prompt, selects model/ratio, and returns "ready_for_confirmation" without clicking Generate — no credits spent. With auto_confirm=true: first verifies the UI is in IMAGE mode (not Video) and that the model is an image model, THEN clicks Generate, waits for the images and downloads them. Image models only.',
+    description: 'WARNING: image generation SPENDS CREDITS. Always auto-detects and forces the plain bottom composer ("fresh" mode) first, closing any open follow-up Agent-chat sidebar — settings and output count are only reliable in fresh mode. Default (auto_confirm=false): fills the prompt, selects model/ratio, and returns "ready_for_confirmation" without clicking Generate — no credits spent. With auto_confirm=true: first verifies the UI is in IMAGE mode (not Video) and that the model is an image model, THEN clicks Generate, waits for the images and downloads them, and returns their editIds/editUrls for use with flow_open_generation/flow_edit_generation/flow_download_latest. Image models only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -96,7 +99,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_generate_video',
-    description: 'Set up a video generation in Google Flow. Fills prompt, selects Omni Flash or Veo model, configures settings. NOTE: Does NOT click final Generate (paid feature — stops at ready-to-generate).',
+    description: 'Set up a video generation in Google Flow. Always auto-detects and forces the plain bottom composer ("fresh" mode) first, closing any open follow-up Agent-chat sidebar. Fills prompt, selects Omni Flash or Veo model, configures settings. NOTE: Does NOT click final Generate (paid feature — stops at ready-to-generate).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -114,7 +117,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_download_latest',
-    description: 'Download the most recently generated file from Google Flow.',
+    description: 'Download a generated file from Google Flow. Downloads whatever is currently on screen by default (the most recent generation); pass id to target a specific generation instead (from flow_list_generations/flow_generate_image/flow_edit_generation) — navigates there first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -122,6 +125,14 @@ const TOOL_DEFINITIONS = [
           type: 'string',
           description: 'Target resolution: "1K" (default, direct API shortcut), "2K" (UI-driven upscaled download into outputs/), "4K" (paid plan required, unsupported).',
           default: '1K',
+        },
+        id: {
+          type: 'string',
+          description: 'Optional generation id (edit-route id, not the img-src id) to download instead of whatever is currently on screen.',
+        },
+        filename: {
+          type: 'string',
+          description: 'Optional filename to save as (in outputs/images/), e.g. "oak_tree_night.jpg". Extension is inferred from the actual downloaded file if omitted. Defaults to an auto-generated name.',
         },
       },
     },
@@ -261,6 +272,50 @@ const TOOL_DEFINITIONS = [
         project_name: { type: 'string', description: 'Optional project name.' },
         campaign: { type: 'string', description: 'Optional campaign identifier.' },
       },
+    },
+  },
+  {
+    name: 'flow_list_generations',
+    description: 'List recent generations in the current project\'s gallery grid (newest-first): id (edit-route id), editUrl, title. Scrolls the virtualized grid to load older ones if limit exceeds what\'s initially rendered. Titles come from the gallery DOM when present, else backfilled from this MCP process\'s own generation history — null if neither source has it (e.g. generations from before this server started).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max number of generations to return.', default: 20 },
+        project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
+        project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
+        campaign: { type: 'string', description: 'Campaign identifier for project matching.' },
+      },
+    },
+  },
+  {
+    name: 'flow_open_generation',
+    description: 'Navigate directly to a specific generation\'s edit page by id (from flow_list_generations/flow_generate_image) or full editUrl. Prefers clicking the gallery tile if visible (real navigation), otherwise hard-navigates and verifies Flow didn\'t bounce back to the gallery.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Generation id (edit-route id). Either this or url is required.' },
+        url: { type: 'string', description: 'Full or relative edit URL. Either this or id is required.' },
+        project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
+        project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
+        campaign: { type: 'string', description: 'Campaign identifier for project matching.' },
+      },
+    },
+  },
+  {
+    name: 'flow_edit_generation',
+    description: 'WARNING: spends credits. Follow-up (in-place) edit on an existing generation using the same composer as the edit page (e.g. "add a bee to this image") — this updates the image in place, it does not create a new gallery entry. If id/url is given, navigates there first; otherwise requires the browser to already be on a generation\'s edit page. Default (auto_confirm=false): fills the instruction only, no credits spent. With auto_confirm=true: clicks Create and returns the new media id(s).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instruction: { type: 'string', description: 'The change to make, e.g. "make the sky more dramatic".' },
+        id: { type: 'string', description: 'Generation id to edit. Optional if already on that generation\'s edit page.' },
+        url: { type: 'string', description: 'Full or relative edit URL to edit. Optional if already on that generation\'s edit page.' },
+        auto_confirm: { type: 'boolean', description: 'CREDITS. If false (default): fills instruction only. If true: clicks Create (spends credits).', default: false },
+        project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
+        project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
+        campaign: { type: 'string', description: 'Campaign identifier for project matching.' },
+      },
+      required: ['instruction'],
     },
   },
 ];
@@ -415,6 +470,21 @@ async function handleToolCall(name, args) {
 
     case 'flow_change_settings': {
       const result = await handleChangeSettings(args);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_list_generations': {
+      const result = await handleListGenerations(args);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_open_generation': {
+      const result = await handleOpenGeneration(args);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_edit_generation': {
+      const result = await handleEditGeneration(args);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 

@@ -43,6 +43,33 @@ export function prepareDownload(type, model, jobId, index = 1) {
   return { dir, filename, fullPath };
 }
 
+// Resolves the save path for a download, honoring an explicit caller-supplied
+// filename when given. Precedence: caller's filename > the real filename Flow
+// itself suggests for the download (has the correct extension already) >
+// the generic auto-generated flow_<date>_..._<jobId> scheme.
+export function resolveDownloadPath(type, { filename, suggestedFilename, model, jobId, index = 1 } = {}) {
+  const dir = getOutputDir(type);
+  const defaultExt = type === 'image' ? 'png' : 'mp4';
+
+  if (filename) {
+    // basename() strips any directory components — caller controls the name,
+    // not the destination directory.
+    let safeName = path.basename(filename);
+    if (!path.extname(safeName)) {
+      const suggestedExt = suggestedFilename ? path.extname(suggestedFilename).replace(/^\./, '') : null;
+      safeName += `.${suggestedExt || defaultExt}`;
+    }
+    return { dir, filename: safeName, fullPath: path.join(dir, safeName) };
+  }
+
+  if (suggestedFilename) {
+    const safeName = path.basename(suggestedFilename);
+    return { dir, filename: safeName, fullPath: path.join(dir, safeName) };
+  }
+
+  return prepareDownload(type, model, jobId, index);
+}
+
 export function findNewFiles(dir, beforeMs) {
   const files = fs.readdirSync(dir).map(f => path.join(dir, f));
   return files.filter(f => {

@@ -6,6 +6,10 @@ import { get } from '../utils/config.js';
 
 const EXPECTED_ACCOUNT = get('expectedAccount', 'your-email@gmail.com');
 
+const WORKFLOW_HINT = 'flow_connect -> flow_generate_image(auto_confirm=true) -> flow_list_generations -> ' +
+  'flow_open_generation / flow_download_latest / flow_edit_generation(auto_confirm=true). ' +
+  'Generation and edit tools auto-force fresh composer mode; no manual sidebar handling needed.';
+
 export async function handleFlowStatus() {
   const status = {
     browser: isBrowserConnected(),
@@ -15,6 +19,7 @@ export async function handleFlowStatus() {
     currentUrl: null,
     pageTitle: null,
     queue: jobQueue.getStatus(),
+    workflow: WORKFLOW_HINT,
   };
 
   if (isBrowserConnected()) {

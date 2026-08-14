@@ -111,6 +111,10 @@ class JobQueue {
     return this.currentJob;
   }
 
+  getCompletedJobs() {
+    return [...this.jobs.values()].filter(j => j.status === 'completed');
+  }
+
   getStatus() {
     return {
       hasActiveJob: this.currentJob?.status === 'running' || this.currentJob?.status === 'queued',

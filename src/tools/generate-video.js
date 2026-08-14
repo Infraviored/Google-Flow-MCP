@@ -6,7 +6,7 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { prepareDownload, findNewFiles, saveMetadata } from '../utils/file-manager.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { get } from '../utils/config.js';
-import { applySettings, closeSidebar } from '../browser/agent-settings.js';
+import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt } from '../browser/composer.js';
 import fs from 'fs';
 import path from 'path';
@@ -69,6 +69,9 @@ export async function handleGenerateVideo(args) {
     // Always generate from the plain bottom composer ("fresh" mode), never from an
     // open Agent-chat sidebar ("follow-up" mode) — see agent-settings.js.
     await closeSidebar(page);
+
+    // Agent mode ON does not reliably honor the settings menu — force it OFF.
+    await ensureAgentOff(page);
 
     // Select model
     const model = selectVideoModel(args.model);

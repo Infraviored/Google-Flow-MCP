@@ -6,8 +6,9 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { prepareDownload, saveMetadata } from '../utils/file-manager.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { get } from '../utils/config.js';
-import { applySettings, closeSidebar } from '../browser/agent-settings.js';
+import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
+import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds } from '../browser/gallery.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -72,6 +73,11 @@ export async function handleGenerateImage(args) {
     // STEP 1.5: Always generate from the plain bottom composer ("fresh" mode), never
     // from an open Agent-chat sidebar ("follow-up" mode) — see agent-settings.js.
     await closeSidebar(page);
+
+    // STEP 1.6: Agent mode ON routes generation through Flow's own conversational
+    // copilot, which does NOT reliably honor the settings menu (confirmed live:
+    // repeatedly generated 16:9 x2 regardless of panel state) — force it OFF.
+    await ensureAgentOff(page);
 
     // STEP 2: Model selection (config-level, before UI interaction)
     const model = selectModel(args.model);
@@ -225,16 +231,7 @@ export async function handleGenerateImage(args) {
     // the post-generate poll below would match those historic images on its very first
     // check (before the new ones have even started rendering) and treat generation as
     // instantly "done".
-    const baselineImageUuids = new Set(await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      const uuids = [];
-      imgs.forEach(img => {
-        const src = img.src || '';
-        const match = src.match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
-        if (match && img.width > 100) uuids.push(match[1]);
-      });
-      return uuids;
-    }));
+    const baselineImageUuids = await getVisibleMediaIds(page);
 
     // STEP 10: Click generate — CREDITS WILL BE SPENT
     logger.info('Clicking Generate — credits will be spent');
@@ -265,49 +262,11 @@ export async function handleGenerateImage(args) {
 
     logger.info('Generation flow', { mode: flowMode });
 
-    // STEP 12: Wait for images to appear in the DOM
+    // STEP 12: Wait for images to appear in the DOM (shared poll — see gallery.js)
     logger.info('Waiting for generated images...');
-    let generatedImageUuids = [];
-    let stableCount = 0;
-    let lastNewCount = -1;
-    const genTimeoutMs = get('generationTimeoutMs', 120000);
-    const genStart = Date.now();
-
-    while (Date.now() - genStart < genTimeoutMs) {
-      await page.waitForTimeout(2000);
-
-      const newImageUuids = await page.evaluate((baseline) => {
-        const imgs = Array.from(document.querySelectorAll('img'));
-        const uuids = [];
-        imgs.forEach(img => {
-          const src = img.src || '';
-          const match = src.match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
-          if (match && img.width > 100 && !baseline.includes(match[1])) {
-            uuids.push(match[1]);
-          }
-        });
-        return [...new Set(uuids)];
-      }, [...baselineImageUuids]);
-
-      // Require the new-image count to hold steady across two consecutive polls before
-      // treating generation as complete — a still-loading tile can briefly get an img src
-      // before its final content is ready.
-      if (newImageUuids.length > 0 && newImageUuids.length === lastNewCount) {
-        stableCount++;
-        if (stableCount >= 1) {
-          generatedImageUuids = newImageUuids;
-          logger.info('New generated images stable in DOM', { count: newImageUuids.length });
-          break;
-        }
-      } else {
-        stableCount = 0;
-      }
-      lastNewCount = newImageUuids.length;
-
-      if ((Date.now() - genStart) % 30000 < 2000) {
-        logger.info('Still waiting for new images...', { elapsed: Date.now() - genStart, newSoFar: newImageUuids.length });
-      }
-    }
+    const generatedImageUuids = await waitForNewMedia(page, baselineImageUuids, {
+      timeoutMs: get('generationTimeoutMs', 120000),
+    });
 
     if (generatedImageUuids.length === 0) {
       await takeScreenshot(page, 'no-images-detected');
@@ -350,6 +309,14 @@ export async function handleGenerateImage(args) {
         'Failed to download any generated images via the authenticated session');
     }
 
+    // The img-src id used above for direct download is NOT the same id as the
+    // gallery tile's /edit/{id} route (confirmed live) — map to the edit-route
+    // ids too so callers can jump straight to flow_open_generation/list backfill.
+    const mediaIdToTileId = await waitForStableTileIds(page, generatedImageUuids).catch(() => ({}));
+    const editIds = Object.values(mediaIdToTileId);
+    const projectIdForUrls = page.url().split('/project/')[1]?.split(/[/?#]/)[0];
+    const editUrls = editIds.map(id => `https://labs.google/fx/en/tools/flow/project/${projectIdForUrls}/edit/${id}`);
+
     saveMetadata(job.id, {
       type: 'image',
       model,
@@ -360,6 +327,7 @@ export async function handleGenerateImage(args) {
       files: downloadedFiles,
       jobId: job.id,
       imageUuids: generatedImageUuids,
+      editIds,
     });
 
     jobQueue.completeJob(job.id, {
@@ -371,6 +339,9 @@ export async function handleGenerateImage(args) {
       prompt: args.prompt,
       files: downloadedFiles,
       image_count: downloadedFiles.length,
+      imageUuids: generatedImageUuids,
+      editIds,
+      editUrls,
       credits_consumed: true,
     });
 
