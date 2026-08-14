@@ -1,0 +1,299 @@
+{
+  "_description": "UI selectors map for Google Flow. Discovered via flow_discover_ui. Update when Flow UI changes.",
+  "_lastUpdated": "2026-08-13T15:32:14.216Z",
+  "main": {
+    "url": "https://labs.google/fx/tools/flow",
+    "title": "Google Flow - AI Creative Studio for Video, Images & Custom Tools",
+    "discoveredAt": "2026-08-13T15:32:14.216Z",
+    "selectors": {
+      "buttons": [
+        {
+          "text": "Hide",
+          "visible": false,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "help_outlinedFlow Help CenterFlow Help Center",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "more_vert",
+          "visible": true,
+          "tag": "I",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "PRO",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "closeDismissDismiss",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "Explore Tools",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 1",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 1",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 2",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 2",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 3",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 3",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 4",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 4",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 5",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 5",
+          "dataTestId": null
+        },
+        {
+          "text": "Try Omni now",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 1",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 1",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 2",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 2",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 3",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 3",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 4",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 4",
+          "dataTestId": null
+        },
+        {
+          "text": "Go to banner 5",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": "Go to banner 5",
+          "dataTestId": null
+        },
+        {
+          "text": "close",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "editEdit project",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "deleteDelete project",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "editEdit project",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "deleteDelete project",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "editEdit project",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "deleteDelete project",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "add_2New project",
+          "visible": false,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        }
+      ],
+      "inputs": [
+        {
+          "placeholder": "",
+          "ariaLabel": "",
+          "name": "g-recaptcha-response",
+          "type": "TEXTAREA",
+          "visible": false
+        }
+      ],
+      "links": [
+        {
+          "text": "Learn more",
+          "href": "https://policies.google.com/technologies/cookies?hl=en",
+          "visible": false
+        },
+        {
+          "text": "Google Flow",
+          "href": "/fx/tools/flow",
+          "visible": true
+        },
+        {
+          "text": "Flow Music",
+          "href": "https://www.flowmusic.app/?utm_source=flow",
+          "visible": true
+        },
+        {
+          "text": "tvFlow TV",
+          "href": "https://labs.google/flow/tv",
+          "visible": true
+        }
+      ],
+      "headings": [
+        {
+          "level": "H2",
+          "text": "Tools from creators like you"
+        },
+        {
+          "level": "H2",
+          "text": "Introducing Gemini Omni Flash"
+        }
+      ],
+      "modelTexts": [
+        "Introducing Gemini Omni Flash",
+        "Try Omni now"
+      ],
+      "ratioTexts": [
+        "Aug 11, 04:19 PM",
+        "Aug 11, 04:17 PM",
+        "Aug 11, 02:11 PM"
+      ]
+    }
+  },
+  "imageGeneration": {
+    "selectors": {}
+  },
+  "videoGeneration": {
+    "selectors": {}
+  },
+  "characters": {
+    "url": null,
+    "selectors": {}
+  },
+  "scenes": {
+    "url": null,
+    "selectors": {}
+  },
+  "toolsGallery": {
+    "url": null,
+    "selectors": {}
+  },
+  "gridArchitect": {
+    "url": null,
+    "selectors": {}
+  },
+  "image-generation": {
+    "url": "https://accounts.google.com/v3/signin/accountchooser?client_id=365941595420-v51i7q8ik0crmaoltkhuo5ogb1kekl6f.apps.googleusercontent.com&code_challenge=8X3geRpjFd9XpRL1Fx5OFjQ_KNPcfRpnsayqMSWSieQ&code_challenge_method=S256&redirect_uri=https%3A%2F%2Flabs.google%2Ffx%2Fapi%2Fauth%2Fcallback%2Fgoogle&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Faisandbox+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email&state=uEmrkRG3-DOYk2_U6PSufDEQaWQ3s68-P3MmRZCcPtw&dsh=S-264507213%3A1786449645106145&o2v=2&service=lso&flowName=GeneralOAuthFlow&opparams=%253F&continue=https%3A%2F%2Faccounts.google.com%2Fsignin%2Foauth%2Fconsent%3Fauthuser%3Dunknown%26part%3DAJi8hANnWNNyIFayh3S9HbK024f-llQz7ACGBWTKWKd39ZN1oL-uD65_YhJtKUrQWdGuVj635SCDcbyy4WZKJW-De_g0CGTbWTvwoq7eStMQmk5ysSO-YcQhlkEfYzrmUQRXDLCTS9oYoEXlgyxxuT-fr5LswpxrKbZV4ormqzAH-nhaX5ljhYFv95sbMkoFSd8F2iOVS12E4dxlM3o3j3hYS9d4yljeJwSWyZO1s9NHQ4VqtHcE4z4vBKA1Bx03eekxyZd0OUDTqFO63DIr78l28C8aQ-XiSKNYFL8Gzolied-HO5bhvL511EwmL1wIXlBDJ13E6LJOydLLwiWjGkkHSRot_iJiTsyOd6A9ZeoWb4US234uxvmSVGf6l_MY3jZ7vZekeW0hl1-2cwzOlcNqKOMDd3iTU9_MXWP0Mwh1c0GmduWqMrYQPjFrx9iuiyI25q77eRmEeJkkrE4n5kNG1VOIbxGa4w%26flowName%3DGeneralOAuthFlow%26as%3DS-264507213%253A1786449645106145%26client_id%3D365941595420-v51i7q8ik0crmaoltkhuo5ogb1kekl6f.apps.googleusercontent.com%26requestPath%3D%252Fsignin%252Foauth%252Fconsent%23&app_domain=https%3A%2F%2Flabs.google",
+    "title": "Anmelden – Google Konten",
+    "discoveredAt": "2026-08-11T12:00:49.565Z",
+    "selectors": {
+      "buttons": [
+        {
+          "text": "help_outlinedFlow Help CenterFlow Help Center",
+          "visible": true,
+          "tag": "BUTTON",
+          "ariaLabel": null,
+          "dataTestId": null
+        },
+        {
+          "text": "more_vert",
+          "visible": true,
+          "tag": "I",
+          "ariaLabel": null,
+          "dataTestId": null
+        }
+      ],
+      "inputs": [],
+      "links": [
+        {
+          "text": "Google Flow",
+          "href": "/fx/tools/flow",
+          "visible": true
+        },
+        {
+          "text": "tvFlow TV",
+          "href": "https://labs.google/flow/tv",
+          "visible": true
+        }
+      ],
+      "headings": [],
+      "modelTexts": [],
+      "ratioTexts": []
+    }
+  }
+}

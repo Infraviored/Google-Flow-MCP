@@ -1,0 +1,383 @@
+import { logger } from '../utils/logger.js';
+import { getPage } from '../browser/connect.js';
+import { jobQueue } from '../queue/job-queue.js';
+import { FlowError, ErrorCodes } from '../utils/errors.js';
+import { takeScreenshot } from '../utils/screenshots.js';
+import { prepareDownload, saveMetadata } from '../utils/file-manager.js';
+import { ensureProjectInContext } from '../navigation/project-navigator.js';
+import { get } from '../utils/config.js';
+import { applySettings, closeSidebar } from '../browser/agent-settings.js';
+import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
+import fs from 'fs';
+import path from 'path';
+
+const IMAGE_MODEL_MAP = {
+  'Nano Banana Pro': 'nano_banana_pro',
+  'Nano Banana 2': 'narwhal_display',
+  'Nano Banana 2 Lite': 'harbor_seal',
+};
+
+const IMAGE_RATIO_MAP = {
+  '16:9': 'IMAGE_ASPECT_RATIO_LANDSCAPE',
+  '4:3': 'IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE',
+  '1:1': 'IMAGE_ASPECT_RATIO_SQUARE',
+  '3:4': 'IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR',
+  '9:16': 'IMAGE_ASPECT_RATIO_PORTRAIT',
+};
+
+function selectModel(requested) {
+  if (!requested || requested === 'auto') {
+    return 'Nano Banana 2';
+  }
+  if (IMAGE_MODEL_MAP[requested]) return requested;
+  return null;
+}
+
+function selectRatio(requested) {
+  if (!requested) return '16:9';
+  if (IMAGE_RATIO_MAP[requested]) return requested;
+  return null;
+}
+
+let lastAppliedImageSettings = null;
+
+export async function handleGenerateImage(args) {
+  const autoConfirm = args.auto_confirm === true;
+  const job = jobQueue.createJob('image_generation', {
+    prompt: args.prompt,
+    model: args.model || 'auto',
+    ratio: args.ratio || '16:9',
+    auto_confirm: autoConfirm,
+    quantity: args.quantity || 1,
+    outputFolder: args.output_folder,
+    useCharacter: args.use_character,
+    useScene: args.use_scene,
+    useTool: args.use_tool,
+    references: args.references,
+    project_name: args.project_name,
+    campaign: args.campaign,
+  });
+
+  try {
+    jobQueue.startJob(job.id);
+    const page = getPage();
+
+    // STEP 1: Ensure we're in a project context
+    await ensureProjectInContext(page, {
+      project_id: args.project_id,
+      name: args.project_name,
+      campaign: args.campaign,
+    });
+
+    // STEP 1.5: Always generate from the plain bottom composer ("fresh" mode), never
+    // from an open Agent-chat sidebar ("follow-up" mode) — see agent-settings.js.
+    await closeSidebar(page);
+
+    // STEP 2: Model selection (config-level, before UI interaction)
+    const model = selectModel(args.model);
+    if (!model) {
+      const validModels = Object.keys(IMAGE_MODEL_MAP);
+      throw new FlowError(ErrorCodes.MODEL_NOT_AVAILABLE,
+        `Model "${args.model}" not available. Available image models: ${validModels.join(', ')}`,
+        { requested: args.model, available: validModels });
+    }
+    logger.info('Using model', { model });
+
+    // 🛡️ SAFETY: Verify model is an IMAGE model, NOT a video model
+    const videoModels = get('videoModels', {});
+    if (!IMAGE_MODEL_MAP[model]) {
+      throw new FlowError(ErrorCodes.MODEL_NOT_AVAILABLE,
+        `SAFETY BLOCK: "${model}" is not a valid image model. ` +
+        `Use flow_generate_video for videos. Image models: ${Object.keys(IMAGE_MODEL_MAP).join(', ')}`);
+    }
+    if (videoModels[model]) {
+      throw new FlowError(ErrorCodes.MODEL_NOT_AVAILABLE,
+        `SAFETY BLOCK: "${model}" is also a VIDEO model. ` +
+        `Refusing to generate to avoid spending video credits. Image models: ${Object.keys(IMAGE_MODEL_MAP).join(', ')}`);
+    }
+
+    // STEP 3: Ratio selection
+    const ratio = selectRatio(args.ratio);
+    if (!ratio) {
+      throw new FlowError(ErrorCodes.RATIO_NOT_AVAILABLE,
+        `Ratio "${args.ratio}" not available. Available: ${Object.keys(IMAGE_RATIO_MAP).join(', ')}`);
+    }
+
+    // STEP 3.5: Apply model, ratio, and quantity via Agent Settings UI panel
+    const quantity = Math.min(Math.max(args.quantity || 1, 1), 4);
+    const settingsChanged = !lastAppliedImageSettings ||
+      lastAppliedImageSettings.model !== model ||
+      lastAppliedImageSettings.ratio !== ratio ||
+      lastAppliedImageSettings.quantity !== quantity;
+
+    if (settingsChanged) {
+      logger.info('Applying image settings via Agent Settings UI panel', { model, ratio, quantity });
+      const applied = await applySettings(page, { model, ratio, quantity });
+      lastAppliedImageSettings = {
+        model: applied.model || model,
+        ratio: applied.ratio || ratio,
+        quantity: applied.quantity || quantity,
+      };
+      logger.info('Agent settings updated via UI', lastAppliedImageSettings);
+    }
+
+    // STEP 4: Verify the model selector confirms IMAGE mode (NOT video)
+    // Flow's bottom toolbar is always present in a project with a model selector.
+    // No "Image/Video" mode tabs exist — the generation mode is determined by
+    // which model is selected (e.g. "Nano Banana 2" = image, "Omni Flash" = video).
+    const modelFromUI = await page.evaluate(() => {
+      const modelBtn = Array.from(document.querySelectorAll('button'))
+        .find(b => {
+          const text = b.textContent || '';
+          return (text.includes('Nano') || text.includes('Banana') ||
+                  text.includes('Omni') || text.includes('Veo') ||
+                  text.includes('Imagen')) && b.offsetParent !== null;
+        });
+      return modelBtn ? modelBtn.textContent.trim().replace(/\s+/g, ' ').substring(0, 80) : null;
+    }).catch(() => null);
+
+    if (modelFromUI) {
+      logger.info('Model selector shows:', { modelFromUI });
+      const videoModelNames = ['Omni Flash', 'Veo', 'Omni'];
+      const isVideoModel = videoModelNames.some(v => modelFromUI.includes(v));
+      if (isVideoModel) {
+        await takeScreenshot(page, 'video-model-detected');
+        throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
+          `SAFETY BLOCK: the UI model "${modelFromUI}" is a VIDEO model. ` +
+          `Refusing to generate to avoid spending paid video credits. ` +
+          `Use flow_generate_video for videos.`);
+      }
+      logger.info('✅ Model selector confirms image mode');
+    } else {
+      logger.warn('Could not read model selector — assuming image mode from config');
+    }
+
+    // Also verify the generate button exists (confirms the toolbar is active)
+    const hasGenerateBtn = await page.locator(
+      'button:has-text("arrow_forward"), button:has-text("Create"), button:has-text("Generate")'
+    ).first().isVisible().catch(() => false);
+    if (!hasGenerateBtn) {
+      logger.warn('Generate button not visible on project page');
+    }
+
+    // STEP 5: Find the prompt input (shared composer — see composer.js)
+    const promptInput = await getPromptInput(page);
+    if (!promptInput) {
+      await takeScreenshot(page, 'no-prompt-input');
+      throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
+        'Could not find prompt input field inside the project. ' +
+        'The Flow UI may have changed. Expected [contenteditable] or textarea.'
+      );
+    }
+    logger.info('Found prompt input on page');
+
+    // STEP 6: Fill the prompt
+    await fillPrompt(page, promptInput, args.prompt);
+    logger.info('Prompt filled', { promptLength: args.prompt.length });
+
+    // ⚠️ STEP 7: DECISION POINT — auto_confirm determines if we click Generate
+    if (!autoConfirm) {
+      // SAFE MODE: Setup only, no click. Return "ready_for_confirmation".
+      const setupScreenshot = await takeScreenshot(page, 'image-ready-for-confirmation');
+      const result = {
+        status: 'ready_for_confirmation',
+        type: 'image',
+        message: 'Prompt, model and ratio are set. No credits spent. ' +
+          'To generate and spend credits, call again with auto_confirm=true.',
+        model_used: model,
+        ratio,
+        prompt: args.prompt,
+        account: get('expectedAccount'),
+        screenshot: setupScreenshot,
+        jobId: job.id,
+      };
+      jobQueue.completeJob(job.id, result);
+      return result;
+    }
+
+    // 🛡️ SAFETY: Pre-generation screenshot verification
+    logger.info('⚠️ auto_confirm=true — vérifications de sécurité avant clic Generate');
+    const preGenScreenshot = await takeScreenshot(page, 'pre-generate-verification');
+
+    // STEP 8: Find generate button (validated visible + enabled)
+    const generateBtnLocator = getGenerateButton(page);
+    const generateBtnVisible = await generateBtnLocator.isVisible().catch(() => false);
+    if (!generateBtnVisible) {
+      await takeScreenshot(page, 'no-generate-btn');
+      throw new FlowError(ErrorCodes.GENERATION_BUTTON_DISABLED, 'Generate button not found');
+    }
+
+    const isDisabled = await generateBtnLocator.isDisabled().catch(() => false);
+    if (isDisabled) {
+      await takeScreenshot(page, 'generate-disabled');
+      throw new FlowError(ErrorCodes.GENERATION_BUTTON_DISABLED, 'Generate button is disabled');
+    }
+
+    // STEP 9: Prepare output directory
+    const outputDir = args.output_folder || prepareDownload('image', model, job.id).dir;
+    if (args.output_folder) {
+      if (!fs.existsSync(args.output_folder)) {
+        fs.mkdirSync(args.output_folder, { recursive: true });
+      }
+    }
+
+    // Baseline: the gallery already contains images from prior generations. Without this,
+    // the post-generate poll below would match those historic images on its very first
+    // check (before the new ones have even started rendering) and treat generation as
+    // instantly "done".
+    const baselineImageUuids = new Set(await page.evaluate(() => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      const uuids = [];
+      imgs.forEach(img => {
+        const src = img.src || '';
+        const match = src.match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
+        if (match && img.width > 100) uuids.push(match[1]);
+      });
+      return uuids;
+    }));
+
+    // STEP 10: Click generate — CREDITS WILL BE SPENT
+    logger.info('Clicking Generate — credits will be spent');
+    await generateBtnLocator.click();
+
+    // STEP 11: Handle two possible generation flows:
+    //   A) Agent-mediated: Agent asks "Accepter?" before generating (when switching modes)
+    //   B) Direct: generation starts immediately (most common)
+    // Try Agent first (short wait), fall through to direct if not detected
+
+    let flowMode = 'direct';
+    logger.info('Checking for Agent confirmation dialog (5s window)...');
+    const acceptTimeoutMs = get('agentResponseTimeoutMs', 5000);
+    const acceptStart = Date.now();
+
+    while (Date.now() - acceptStart < acceptTimeoutMs) {
+      const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
+      if (pageText.includes('Accepter') || pageText.includes('Approve')) {
+        logger.info('Agent confirmation dialog detected — switching to Agent flow');
+        const acceptBtn = page.locator('button').filter({ hasText: /Accepter|Approve/ }).first();
+        await acceptBtn.click();
+        logger.info('Generation confirmed via Agent');
+        flowMode = 'agent';
+        break;
+      }
+      await page.waitForTimeout(500);
+    }
+
+    logger.info('Generation flow', { mode: flowMode });
+
+    // STEP 12: Wait for images to appear in the DOM
+    logger.info('Waiting for generated images...');
+    let generatedImageUuids = [];
+    let stableCount = 0;
+    let lastNewCount = -1;
+    const genTimeoutMs = get('generationTimeoutMs', 120000);
+    const genStart = Date.now();
+
+    while (Date.now() - genStart < genTimeoutMs) {
+      await page.waitForTimeout(2000);
+
+      const newImageUuids = await page.evaluate((baseline) => {
+        const imgs = Array.from(document.querySelectorAll('img'));
+        const uuids = [];
+        imgs.forEach(img => {
+          const src = img.src || '';
+          const match = src.match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
+          if (match && img.width > 100 && !baseline.includes(match[1])) {
+            uuids.push(match[1]);
+          }
+        });
+        return [...new Set(uuids)];
+      }, [...baselineImageUuids]);
+
+      // Require the new-image count to hold steady across two consecutive polls before
+      // treating generation as complete — a still-loading tile can briefly get an img src
+      // before its final content is ready.
+      if (newImageUuids.length > 0 && newImageUuids.length === lastNewCount) {
+        stableCount++;
+        if (stableCount >= 1) {
+          generatedImageUuids = newImageUuids;
+          logger.info('New generated images stable in DOM', { count: newImageUuids.length });
+          break;
+        }
+      } else {
+        stableCount = 0;
+      }
+      lastNewCount = newImageUuids.length;
+
+      if ((Date.now() - genStart) % 30000 < 2000) {
+        logger.info('Still waiting for new images...', { elapsed: Date.now() - genStart, newSoFar: newImageUuids.length });
+      }
+    }
+
+    if (generatedImageUuids.length === 0) {
+      await takeScreenshot(page, 'no-images-detected');
+      throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
+        'Generation completed but no images were detected in the DOM. ' +
+        'Check the Flow project content library.');
+    }
+
+    // STEP 13: Download generated images via authenticated session (using APIRequestContext to avoid page navigation)
+    // Note: 2K/4K upscaled downloads require UI interaction and reCAPTCHA, out of scope for direct API.
+    logger.info('Downloading generated images', { count: generatedImageUuids.length });
+    const downloadedFiles = [];
+
+    for (const uuid of generatedImageUuids) {
+      try {
+        const response = await page.request.get(
+          `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=${uuid}`,
+          { timeout: 15000 }
+        );
+
+        if (response && response.ok()) {
+          const contentType = response.headers()['content-type'] || '';
+          if (contentType.startsWith('image/')) {
+            const buffer = await response.body();
+            const ext = contentType === 'image/png' ? '.png' : '.jpg';
+            const destPath = path.join(outputDir, `flow_${uuid.substring(0, 8)}_${job.id}${ext}`);
+            fs.writeFileSync(destPath, buffer);
+            downloadedFiles.push(destPath);
+            logger.info('Image downloaded', { uuid, size: buffer.length, path: destPath });
+          }
+        }
+      } catch (err) {
+        logger.warn('Failed to download image', { uuid, error: err.message });
+      }
+    }
+
+    if (downloadedFiles.length === 0) {
+      await takeScreenshot(page, 'download-failed');
+      throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
+        'Failed to download any generated images via the authenticated session');
+    }
+
+    saveMetadata(job.id, {
+      type: 'image',
+      model,
+      ratio,
+      auto_confirm: true,
+      quantity: args.quantity || 1,
+      prompt: args.prompt,
+      files: downloadedFiles,
+      jobId: job.id,
+      imageUuids: generatedImageUuids,
+    });
+
+    jobQueue.completeJob(job.id, {
+      status: 'success',
+      type: 'image',
+      account: get('expectedAccount'),
+      model_used: model,
+      ratio,
+      prompt: args.prompt,
+      files: downloadedFiles,
+      image_count: downloadedFiles.length,
+      credits_consumed: true,
+    });
+
+    return jobQueue.getJob(job.id).result;
+  } catch (err) {
+    await takeScreenshot(getPage(), 'generate-image-error');
+    jobQueue.failJob(job.id, err);
+    throw err;
+  }
+}

@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const b = await chromium.connectOverCDP('http://127.0.0.1:9222');
+const ctx = b.contexts()[0];
+const p = await ctx.newPage();
+await p.goto('https://labs.google/fx/en/tools/flow', { waitUntil: 'domcontentloaded', timeout: 30000 });
+await p.waitForTimeout(5000);
+const lang = await p.evaluate(() => document.documentElement.lang);
+const btns = await p.evaluate(() => [...document.querySelectorAll('button,a')].map(e => e.innerText.trim().replace(/\n/g, '|')).filter(Boolean).slice(0, 14));
+console.log(JSON.stringify({ final: p.url(), lang, btns }, null, 1));
+await p.close();
