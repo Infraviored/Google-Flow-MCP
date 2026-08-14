@@ -12,7 +12,7 @@ const FLOW_URL = get('flowUrl', 'https://labs.google/fx/en/tools/flow');
 const CHROME_PROFILE = get('chromeProfile', 'Default');
 const CHROME_USER_DATA_DIR = get('chromeUserDataDir', path.resolve(process.env.HOME, '.config/google-chrome'));
 
-export async function launchKiaraProfile(headless = false) {
+export async function launchKiaraProfile({ headless = false, virtualDisplay } = {}) {
   if (isBrowserConnected()) {
     const alive = await isHandleAliveAsync();
     if (alive) {
@@ -53,6 +53,7 @@ export async function launchKiaraProfile(headless = false) {
       cdpPort: CDP_PORT,
       headless,
       profileSource,
+      virtualDisplay: virtualDisplay ?? get('virtualDisplay', false),
     });
   }
 }

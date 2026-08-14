@@ -1,6 +1,6 @@
 import { getPage } from '../browser/connect.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
-import { applySettings } from '../browser/agent-settings.js';
+import { applySettings, closeSidebar } from '../browser/agent-settings.js';
 
 export async function handleChangeSettings(args = {}) {
   const page = getPage();
@@ -12,6 +12,8 @@ export async function handleChangeSettings(args = {}) {
       campaign: args.campaign,
     });
   }
+
+  await closeSidebar(page);
 
   const applied = await applySettings(page, {
     ratio: args.ratio,

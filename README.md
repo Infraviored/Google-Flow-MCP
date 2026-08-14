@@ -110,13 +110,15 @@ Edit `config/flow.config.json`:
 ```json
 {
   "expectedAccount": "your.email@gmail.com",
-  "chromeProfile": "Profile 3",
+  "chromeProfile": "Profile 1",
   "chromeUserDataDir": "/home/you/.config/google-chrome"
 }
 ```
 
 > 💡 **Finding your Chrome profile:**  
-> Open Chrome and go to `chrome://version/`. Look for **"Profile Path"** — the last folder name is your profile (e.g., `Profile 3`), and the path before it is your `chromeUserDataDir`.
+> Open Chrome and go to `chrome://version/`. Look for **"Profile Path"** — the last folder name is your profile (e.g., `Profile 1`), and the path before it is your `chromeUserDataDir`. This is only used as a one-time seed — see below.
+
+> ⚠️ Nothing here needs to already be signed into Flow — the first `flow_connect` call handles that (next step).
 
 ### 3️⃣ Make scripts executable
 
@@ -124,22 +126,15 @@ Edit `config/flow.config.json`:
 chmod +x scripts/*.sh
 ```
 
-### 4️⃣ Start Chrome with CDP
+### 4️⃣ Start the MCP server
 
 ```bash
-./scripts/start-browser.sh
-```
-
-> This launches Chrome with remote debugging enabled on port 9222 using your configured profile.
-
-### 5️⃣ Start the MCP server
-
-```bash
-# In a separate terminal:
 ./scripts/start-mcp.sh
 ```
 
-### 6️⃣ Register with OpenCode
+There is no separate "launch Chrome first" step — `flow_connect` launches Chrome itself, from a **persistent** profile (`chrome-profile-kiara/` in this repo, gitignored), seeded once from the source profile above. The very first `flow_connect` call needs a VISIBLE window (don't pass `headless`/`virtual_display`) so you can click your Google account in the account-chooser and complete 2FA if prompted — a one-time thing. Every `flow_connect` call after that reuses the same authenticated session automatically, in any display mode, with no further sign-in.
+
+### 5️⃣ Register with OpenCode
 
 ```bash
 ./scripts/register-opencode.sh
@@ -165,7 +160,7 @@ google-flow-browser-mcp/
 │   └── selectors.map.json          # UI selectors (auto-populated)
 │
 ├── 📂 scripts/
-│   ├── start-browser.sh            # Launch Chrome + CDP
+│   ├── start-browser.sh            # DEPRECATED — flow_connect launches Chrome itself now
 │   ├── start-mcp.sh                # Start the MCP server
 │   ├── test-flow-image.sh          # Quick integration test
 │   └── register-opencode.sh        # Register in OpenCode config
@@ -271,7 +266,7 @@ Edit `config/flow.config.json` (copy from `config/flow.config.example.json`):
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `expectedAccount` | `string` | — | Your Google account email ✅ **REQUIRED** |
-| `chromeProfile` | `string` | `"Profile 3"` | Chrome profile directory name |
+| `chromeProfile` | `string` | `"Profile 1"` | Chrome profile directory name — only used once, to seed the persistent profile (see setup step 4) |
 | `chromeUserDataDir` | `string` | — | Full path to Chrome user data directory ✅ **REQUIRED** |
 | `flowUrl` | `string` | *Flow labs URL* | Google Flow URL (supports `fr`, `en` locales) |
 
@@ -281,7 +276,8 @@ Edit `config/flow.config.json` (copy from `config/flow.config.example.json`):
 |-----|------|---------|-------------|
 | `cdpPort` | `number` | `9222` | Chrome DevTools Protocol port |
 | `browserMode` | `string` | `"direct-cdp"` | `"direct-cdp"` (recommended) or `"playwright"` |
-| `headless` | `boolean` | `true` | Run Chrome in headless mode |
+| `headless` | `boolean` | `false` | True Chrome headless. Fastest, but Flow's generate/upscale actions are reCAPTCHA-gated and headless scores worse on bot-detection — not recommended for anything that spends credits. |
+| `virtualDisplay` | `boolean` | `false` | Run headed Chrome on an off-screen Xvfb display (`xvfb` package required) instead of your real screen — same rendering fingerprint/bot-detection profile as a normal visible window, but doesn't take over your mouse/keyboard/focus. Recommended over `headless` for unattended use once the profile is already authenticated (see setup step 4). |
 | `locale` | `string` | `"fr"` | UI locale (`"fr"`, `"en"`, etc.) |
 
 ### ⏱️ Timing
@@ -329,9 +325,9 @@ This project is built with **safety-first design**:
 <summary><strong>Which Chrome profile should I use?</strong></summary>
 
 Open Chrome and go to `chrome://version/`. The **Profile Path** shows both your user data directory and profile name. For example:
-- `/home/you/.config/google-chrome/Profile 3` → `chromeUserDataDir: "/home/you/.config/google-chrome"`, `chromeProfile: "Profile 3"`
+- `/home/you/.config/google-chrome/Profile 1` → `chromeUserDataDir: "/home/you/.config/google-chrome"`, `chromeProfile: "Profile 1"`
 
-You need a profile where you're already logged into your Google account.
+This is only used once, to seed the MCP's own persistent copy — you don't need to already be signed into Flow in this profile. The first `flow_connect` call walks you through sign-in interactively (see setup step 4).
 </details>
 
 <details>

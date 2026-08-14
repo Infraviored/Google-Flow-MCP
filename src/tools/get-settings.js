@@ -1,8 +1,9 @@
 import { getPage } from '../browser/connect.js';
-import { readSettings, closeSettingsPanel } from '../browser/agent-settings.js';
+import { readSettings, closeSettingsPanel, closeSidebar } from '../browser/agent-settings.js';
 
 export async function handleGetSettings() {
   const page = getPage();
+  await closeSidebar(page);
   const current = await readSettings(page);
   await closeSettingsPanel(page);
   return {

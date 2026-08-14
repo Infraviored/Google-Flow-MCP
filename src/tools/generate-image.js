@@ -343,6 +343,8 @@ export async function handleGenerateImage(args) {
       editIds,
       editUrls,
       credits_consumed: true,
+      hint: 'Report the files paths (1K, auto-saved here) to the user, then ask if they want any opened now with ' +
+        'their OS default image viewer — do not open without asking. For 2K/4K, call flow_download_latest.',
     });
 
     return jobQueue.getJob(job.id).result;

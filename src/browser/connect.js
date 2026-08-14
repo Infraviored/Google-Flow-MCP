@@ -131,6 +131,52 @@ async function launchNewBrowser(cdpPort, options = {}) {
   return { browser, context, page };
 }
 
+let virtualDisplayNum = null;
+
+// Runs Chrome fully "headed" (real GPU/font/rendering fingerprint — same
+// bot-detection profile as a normal window, unlike --headless=new) but on an
+// off-screen X11 framebuffer instead of the user's real display, so it never
+// steals their mouse/keyboard/screen. Xvfb is a standalone X server — it
+// doesn't care whether the host session is X11 or Wayland. The only thing
+// that matters is NOT forwarding WAYLAND_DISPLAY to the Chrome process,
+// otherwise Chrome's ozone auto-detection may prefer native Wayland (the
+// user's real session) over the X11 DISPLAY we're pointing it at.
+async function ensureVirtualDisplay() {
+  if (virtualDisplayNum !== null) return virtualDisplayNum;
+
+  const displayNum = get('virtualDisplayNum', 99);
+  const lockFile = `/tmp/.X${displayNum}-lock`;
+
+  if (!fs.existsSync(lockFile)) {
+    const xvfbPath = get('xvfbPath', '/usr/bin/Xvfb');
+    if (!fs.existsSync(xvfbPath)) {
+      throw new FlowError(ErrorCodes.PLAYWRIGHT_ERROR,
+        `Xvfb not found at ${xvfbPath}. Install it (e.g. "apt install xvfb") or set xvfbPath in config.`);
+    }
+
+    logger.info('Starting Xvfb virtual display', { displayNum });
+    const xvfb = spawn(xvfbPath, [`:${displayNum}`, '-screen', '0', '1920x1080x24'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    xvfb.unref();
+
+    let attempts = 0;
+    while (!fs.existsSync(lockFile) && attempts < 20) {
+      await new Promise(r => setTimeout(r, 200));
+      attempts++;
+    }
+    if (!fs.existsSync(lockFile)) {
+      throw new FlowError(ErrorCodes.PLAYWRIGHT_ERROR, `Xvfb did not start in time on display :${displayNum}`);
+    }
+  } else {
+    logger.info('Reusing already-running Xvfb virtual display', { displayNum });
+  }
+
+  virtualDisplayNum = displayNum;
+  return displayNum;
+}
+
 /**
  * Launch Chrome DIRECTLY (not via Playwright) to avoid automation detection
  * (navigator.webdriver=false). Creates temp user-data-dir with Profile 3 cookies,
@@ -157,20 +203,30 @@ export async function launchChromeDirect(options = {}) {
     throw new FlowError(ErrorCodes.PLAYWRIGHT_ERROR, `Chrome not found at ${chromePath}`);
   }
 
-  const tempDir = `/tmp/chrome-kiara-cdp-${Date.now()}`;
-  fs.mkdirSync(tempDir, { recursive: true });
+  // Persistent, not timestamped: a fresh /tmp/chrome-kiara-cdp-{Date.now()}
+  // dir on every single launch meant every launch re-triggered Google's
+  // account-chooser (and, once flagged as a "new device" too many times in a
+  // row, a TOTP challenge) from scratch — confirmed live, repeatedly. Seed
+  // this fixed dir from the real profile ONCE; every later launch reuses it
+  // as-is, so whatever gets past account-chooser/2FA here stays past it.
+  const tempDir = options.persistentProfileDir || path.resolve(import.meta.dirname, '../../chrome-profile-kiara');
+  const alreadySeeded = fs.existsSync(path.join(tempDir, profileName));
 
-  const localStateSrc = path.join(path.dirname(profileSource), 'Local State');
-  if (fs.existsSync(profileSource)) {
-    fs.cpSync(profileSource, path.join(tempDir, profileName), { recursive: true });
-  }
-  if (fs.existsSync(localStateSrc)) {
-    fs.cpSync(localStateSrc, path.join(tempDir, 'Local State'));
+  if (!alreadySeeded) {
+    fs.mkdirSync(tempDir, { recursive: true });
+    const localStateSrc = path.join(path.dirname(profileSource), 'Local State');
+    if (fs.existsSync(profileSource)) {
+      fs.cpSync(profileSource, path.join(tempDir, profileName), { recursive: true });
+    }
+    if (fs.existsSync(localStateSrc)) {
+      fs.cpSync(localStateSrc, path.join(tempDir, 'Local State'));
+    } else {
+      fs.writeFileSync(path.join(tempDir, 'Local State'), JSON.stringify({ profile: { info_cache: {} } }));
+    }
+    logger.info('Persistent profile seeded from source (first run)', { tempDir });
   } else {
-    fs.writeFileSync(path.join(tempDir, 'Local State'), JSON.stringify({ profile: { info_cache: {} } }));
+    logger.info('Reusing already-seeded persistent profile', { tempDir });
   }
-
-  logger.info('Temp profile created with cookies', { tempDir });
 
   try {
     const existing = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
@@ -188,9 +244,23 @@ export async function launchChromeDirect(options = {}) {
   ];
   if (headless) args.push('--headless=new');
 
-  logger.info('Launching Chrome directly', { chromePath, cdpPort, headless });
+  const useVirtualDisplay = options.virtualDisplay ?? get('virtualDisplay', false);
+  let spawnEnv = process.env;
+  if (useVirtualDisplay && !headless) {
+    const displayNum = await ensureVirtualDisplay();
+    spawnEnv = { ...process.env, DISPLAY: `:${displayNum}` };
+    // Stripping WAYLAND_DISPLAY alone was not enough — confirmed live Chrome
+    // still picked native Wayland (the user's real session) via ozone
+    // auto-detection keyed off XDG_SESSION_TYPE, ignoring DISPLAY entirely.
+    // Force X11 explicitly rather than relying on env stripping to be enough.
+    delete spawnEnv.WAYLAND_DISPLAY;
+    delete spawnEnv.XDG_SESSION_TYPE;
+    args.push('--ozone-platform=x11');
+  }
 
-  const chromeProcess = spawn(chromePath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  logger.info('Launching Chrome directly', { chromePath, cdpPort, headless, virtualDisplay: useVirtualDisplay && !headless });
+
+  const chromeProcess = spawn(chromePath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv });
 
   const cdpUrl = `http://127.0.0.1:${cdpPort}`;
   let attempts = 0;
@@ -210,18 +280,15 @@ export async function launchChromeDirect(options = {}) {
   context = browser.contexts()[0];
   page = context.pages()[0] || await context.newPage();
   isConnected = true;
-  global.__chromeTempDir = tempDir;
 
   logger.info('Chrome direct + CDP connected', { webdriver: await page.evaluate(() => navigator.webdriver) });
   return { browser, context, page };
 }
 
 export async function closeBrowser() {
-  if (global.__chromeTempDir) {
-    try { fs.rmSync(global.__chromeTempDir, { recursive: true, force: true }); }
-    catch (e) { logger.warn('Temp cleanup failed', { error: e.message }); }
-    global.__chromeTempDir = null;
-  }
+  // The profile dir (chrome-profile-kiara/) is intentionally persistent —
+  // see launchChromeDirect — never auto-deleted on disconnect, so login/2FA
+  // state survives across sessions.
   if (browser) {
     try {
       await browser.close();

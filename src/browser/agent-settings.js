@@ -19,9 +19,19 @@ export async function closeSidebar(page) {
 
   logger.info('Agent-chat sidebar (follow-up mode) is open, closing to force fresh composer mode');
   await closeBtn.click();
-  await page.waitForTimeout(500);
 
-  const stillOpen = await isSidebarOpen(page);
+  // Some sidebar variants (e.g. a brand-new project's first-load "Untitled
+  // session" welcome panel) take longer than a fixed 500ms to actually
+  // unmount — confirmed live the close succeeded but a single early check
+  // reported it as still open. Poll instead of checking once.
+  let stillOpen = true;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(300);
+    stillOpen = await isSidebarOpen(page);
+    if (!stillOpen) break;
+  }
+
   if (stillOpen) {
     throw new FlowError(
       ErrorCodes.UNKNOWN_UI_CHANGE,

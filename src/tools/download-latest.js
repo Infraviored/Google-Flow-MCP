@@ -6,6 +6,13 @@ import { resolveDownloadPath } from '../utils/file-manager.js';
 import { navigateToGeneration, listGenerations } from '../browser/gallery.js';
 import fs from 'fs';
 
+// Always surfaced on a successful download so the calling agent can't skip
+// it: report the exact path to the human, then ask (don't just do it)
+// whether to open it with their OS default viewer (e.g. `xdg-open` on
+// Linux, `open` on macOS).
+const REPORT_AND_OFFER_TO_OPEN_HINT =
+  'Report this exact filePath to the user, then ask if they want it opened now with their OS default image viewer — do not open it without asking.';
+
 export async function handleDownloadLatest(args = {}) {
   const page = getPage();
   const resolution = (args?.resolution || '1K').toUpperCase();
@@ -103,6 +110,7 @@ export async function handleDownloadLatest(args = {}) {
         resolution: '2K',
         filePath: fullPath,
         size: stat.size,
+        hint: REPORT_AND_OFFER_TO_OPEN_HINT,
       };
     } catch (err) {
       if (err instanceof FlowError) throw err;
@@ -153,6 +161,7 @@ export async function handleDownloadLatest(args = {}) {
           mediaId,
           filePath: fullPath,
           size: buffer.length,
+          hint: REPORT_AND_OFFER_TO_OPEN_HINT,
         };
       }
     }

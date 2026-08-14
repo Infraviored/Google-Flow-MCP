@@ -37,11 +37,12 @@ import path from 'path';
 const TOOL_DEFINITIONS = [
   {
     name: 'flow_connect',
-    description: 'Launch Chrome with the configured Google profile, connect CDP, navigate to Google Flow, and verify account.',
+    description: 'Launch Chrome, connect CDP, navigate to Google Flow, and verify account. Chrome runs from a PERSISTENT profile (chrome-profile-kiara/, seeded once from your real profile) — first-ever connect needs one manual step (click your account in Google\'s account-chooser, possibly a 2FA prompt) in a VISIBLE window; every connect after that reuses the saved session automatically, no window needed. Three display modes exist — ASK THE USER which one they want before the first connect of a session, do not silently assume: (1) headed (default, headless=false/virtual_display=false) — a real visible window, needed for that first-time manual step; (2) virtual_display=true — a real headed Chrome (same rendering fingerprint, same low bot-detection risk as headed) rendered on an off-screen Xvfb display instead of the user\'s real screen, so it never steals their mouse/keyboard/focus — use this for unattended/background work once the profile is already authenticated; (3) headless=true — fastest, but Flow\'s generation/upscale actions are reCAPTCHA-gated and headless Chrome scores noticeably worse on bot-detection, so this is the riskiest option and not recommended for anything that spends credits.',
     inputSchema: {
       type: 'object',
       properties: {
-        headless: { type: 'boolean', description: 'Launch in headless mode (not recommended, Google Flow needs visible browser).', default: false },
+        headless: { type: 'boolean', description: 'True Chrome headless mode. Fastest but highest bot-detection risk (Flow\'s generate/upscale actions are reCAPTCHA-gated) — ask the user before using this.', default: false },
+        virtual_display: { type: 'boolean', description: 'Run headed Chrome on an off-screen Xvfb display instead of the user\'s real screen — same bot-detection profile as a normal visible window, but doesn\'t take over their mouse/keyboard. Recommended for unattended work once already authenticated. Ask the user before using this too.', default: false },
         open_flow: { type: 'boolean', description: 'Auto-navigate to Google Flow after connection.', default: true },
         project_id: { type: 'string', description: 'Navigate straight into this project (from flow_list_projects) instead of the Flow homepage. Skips the homepage hop entirely.' },
       },
@@ -64,12 +65,12 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_account_check',
-    description: 'Verify the logged-in Google account matches the configured expected email (Profile 3).',
+    description: 'Verify the logged-in Google account in the current browser session matches expectedAccount in config/flow.config.json.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flow_discover_ui',
-    description: 'Navigate to a Google Flow page and discover all interactive elements (buttons, inputs, links, headings). Updates the internal selectors map for robust automation.',
+    description: 'Navigate to a Google Flow page and discover all interactive elements (buttons, inputs, links, headings). Updates the internal selectors map. Diagnostic/legacy tool, predates this session\'s live-DOM-verified selectors used by flow_generate_image and friends — not needed for normal usage, only useful when actively debugging a UI change.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -99,7 +100,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_generate_video',
-    description: 'Set up a video generation in Google Flow. Always auto-detects and forces the plain bottom composer ("fresh" mode) first, closing any open follow-up Agent-chat sidebar. Fills prompt, selects Omni Flash or Veo model, configures settings. NOTE: Does NOT click final Generate (paid feature — stops at ready-to-generate).',
+    description: 'Set up a video generation in Google Flow. Always auto-detects and forces the plain bottom composer ("fresh" mode) first, closing any open follow-up Agent-chat sidebar, and forces Agent mode off. Fills prompt, selects Omni Flash or Veo model, configures settings. NOTE: Does NOT click final Generate (paid feature — stops at ready-to-generate). CAUTION: unlike flow_generate_image, the video model codenames used internally are unverified guesses by pattern-matching, not confirmed against live network traffic — this tool has not been proven end-to-end this session. Prefer flow_generate_image for anything that must work reliably; if using this, verify the result carefully before trusting it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -139,7 +140,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_create_character',
-    description: 'Create a new character in Google Flow Characters with name and description.',
+    description: 'Create a new character in Google Flow Characters with name and description. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously (check the result/a screenshot) before relying on it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -155,7 +156,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_import_character',
-    description: 'Import a character from a saved JSON file into Google Flow.',
+    description: 'Import a character from a saved JSON file into Google Flow. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously before relying on it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -166,12 +167,12 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_open_characters',
-    description: 'Open the Google Flow Characters page and list existing characters.',
+    description: 'Open the Google Flow Characters page and list existing characters. UNVERIFIED: predates this session\'s live-testing work — test cautiously before relying on it.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flow_create_scene',
-    description: 'Create a new scene in Google Flow Scenes with characters and prompt.',
+    description: 'Create a new scene in Google Flow Scenes with characters and prompt. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously before relying on it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -186,12 +187,12 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_open_tools_gallery',
-    description: 'Open the Google Flow Tools Gallery and list available tools.',
+    description: 'Open the Google Flow Tools Gallery and list available tools. UNVERIFIED: predates this session\'s live-testing work — test cautiously before relying on it.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flow_use_grid_architect',
-    description: 'Open Grid Architect in Google Flow, fill theme prompt, shot prompts, engine, ratio, and visual logic settings. Supports batch shot generation for brand campaigns.',
+    description: 'Open Grid Architect in Google Flow, fill theme prompt, shot prompts, engine, ratio, and visual logic settings. Supports batch shot generation for brand campaigns. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously before relying on it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -210,7 +211,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_use_tool',
-    description: 'Open any tool by name in Google Flow and optionally fill its configuration parameters.',
+    description: 'Open any tool by name in Google Flow and optionally fill its configuration parameters. UNVERIFIED: predates this session\'s live-testing work — test cautiously before relying on it. For image generation specifically, prefer flow_generate_image instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -253,7 +254,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_get_settings',
-    description: 'Read the currently selected image ratio, quantity, and model settings from the Google Flow composer panel.',
+    description: 'Read the currently selected image ratio, quantity, and model. Auto-forces Agent mode off first — Agent ON has its own separate settings surface that does not reliably reflect what actually gets generated, so this always reads the Agent-OFF one-shot settings menu, the one flow_generate_image actually uses.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -261,7 +262,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_change_settings',
-    description: 'Change ratio, model, or quantity settings in Google Flow composer panel, verify read-back, and save. Throws FlowError if settings cannot be set or verified.',
+    description: 'Change ratio, model, or quantity settings, verify read-back, and save. Auto-forces Agent mode off first (see flow_get_settings) — these settings only reliably drive actual generation output when Agent is off. Throws if a setting cannot be set or verified (fail-loud, never silently applies the wrong value).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -325,7 +326,10 @@ async function handleToolCall(name, args) {
 
   switch (name) {
     case 'flow_connect': {
-      const result = await launchKiaraProfile(args?.headless || false);
+      const result = await launchKiaraProfile({
+        headless: args?.headless || false,
+        virtualDisplay: args?.virtual_display || false,
+      });
       if (result.browser) setBrowser(result.browser);
       const page = getPage();
       let oauthRequired = false;
@@ -345,12 +349,12 @@ async function handleToolCall(name, args) {
       if (oauthRequired) {
         return { content: [{ type: 'text', text: JSON.stringify({
           status: 'oauth_required',
-          message: 'Google Flow requires OAuth authentication. Open Chrome Profile 3 manually once:\n'
-            + '  1. Launch: google-chrome --profile-directory="Profile 3"\n'
-            + '  2. Navigate to: https://labs.google/fx/tools/flow/tools/grid-architect\n'
-            + '  3. Complete the Google sign-in (one time)\n'
-            + '  4. Retry this MCP tool in headless mode',
-          browserType: 'Chrome Profile 3',
+          message: 'Google sign-in needed in the persistent profile (chrome-profile-kiara/) — this only ever '
+            + 'happens once, then every future flow_connect reuses the saved session automatically. This step '
+            + 'needs a VISIBLE window: if this call used virtual_display=true or headless=true, retry with '
+            + 'both false so a human can see and complete it, then future calls can go back to any mode. '
+            + 'Ask the user to: 1) look at the Chrome window, 2) pick their Google account (and complete 2FA '
+            + 'if prompted), 3) retry this tool once signed in.',
           account: accountCheck?.account || 'verified-account',
           url: page.url().substring(0, 100),
           accountVerified: accountCheck,
@@ -358,7 +362,6 @@ async function handleToolCall(name, args) {
       }
       return { content: [{ type: 'text', text: JSON.stringify({
         status: 'connected',
-        browserType: 'Chrome Profile 3',
         account: accountCheck?.account || 'verified-account',
         url: page.url(),
         accountVerified: accountCheck,
