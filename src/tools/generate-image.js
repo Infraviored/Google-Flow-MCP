@@ -6,6 +6,7 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { prepareDownload, saveMetadata } from '../utils/file-manager.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { get } from '../utils/config.js';
+import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
 import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds } from '../browser/gallery.js';
@@ -69,6 +70,20 @@ export async function handleGenerateImage(args) {
       name: args.project_name,
       campaign: args.campaign,
     });
+
+    // STEP 1.4: ensureProjectInContext only checks the project id in the URL, which
+    // still matches while sitting on a generation's /edit/{id} page (a prior
+    // flow_edit_generation call, or a leftover download-triggered navigation, can
+    // leave the browser there) — that page's composer has no Agent toggle at all,
+    // so ensureAgentOff below would fail outright. Navigate back to the project
+    // root first so "fresh composer mode" actually means fresh.
+    const preGenUrl = page.url();
+    if (preGenUrl.includes('/edit/')) {
+      const projectRootUrl = preGenUrl.split('/edit/')[0];
+      logger.info('On a generation edit page — navigating back to project root for fresh composer', { from: preGenUrl, to: projectRootUrl });
+      await page.goto(projectRootUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.waitForTimeout(1500);
+    }
 
     // STEP 1.5: Always generate from the plain bottom composer ("fresh" mode), never
     // from an open Agent-chat sidebar ("follow-up" mode) — see agent-settings.js.
@@ -193,7 +208,7 @@ export async function handleGenerateImage(args) {
         model_used: model,
         ratio,
         prompt: args.prompt,
-        account: get('expectedAccount'),
+        account: getActiveExpectedAccount(),
         screenshot: setupScreenshot,
         jobId: job.id,
       };
@@ -333,7 +348,7 @@ export async function handleGenerateImage(args) {
     jobQueue.completeJob(job.id, {
       status: 'success',
       type: 'image',
-      account: get('expectedAccount'),
+      account: getActiveExpectedAccount(),
       model_used: model,
       ratio,
       prompt: args.prompt,

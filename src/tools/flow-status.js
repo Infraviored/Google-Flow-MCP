@@ -1,10 +1,8 @@
 import { logger } from '../utils/logger.js';
-import { getPage, isBrowserConnected } from '../browser/connect.js';
+import { getPage, isBrowserConnected, getActiveProfileKey } from '../browser/connect.js';
 import { verifyAccount } from '../browser/account-check.js';
 import { jobQueue } from '../queue/job-queue.js';
-import { get } from '../utils/config.js';
-
-const EXPECTED_ACCOUNT = get('expectedAccount', 'your-email@gmail.com');
+import { getActiveExpectedAccount, getDefaultProfileKey } from '../browser/launch-profile.js';
 
 const WORKFLOW_HINT = 'flow_connect -> flow_generate_image(auto_confirm=true) -> flow_list_generations -> ' +
   'flow_open_generation / flow_download_latest / flow_edit_generation(auto_confirm=true). ' +
@@ -22,6 +20,9 @@ export async function handleFlowStatus() {
     workflow: WORKFLOW_HINT,
   };
 
+  const activeProfileKey = getActiveProfileKey();
+  const expectedAccount = getActiveExpectedAccount();
+
   if (isBrowserConnected()) {
     try {
       const page = getPage();
@@ -31,7 +32,7 @@ export async function handleFlowStatus() {
       status.oauthRequired = status.currentUrl?.includes('accounts.google.com') || false;
 
       if (status.flowAccessible && !status.oauthRequired) {
-        const verified = await verifyAccount().catch(() => null);
+        const verified = await verifyAccount({ expectedAccount, enforceExpected: true }).catch(() => null);
         status.account = verified?.verified ? verified.account : null;
       }
     } catch (err) {
@@ -39,7 +40,8 @@ export async function handleFlowStatus() {
     }
   }
 
-  status.expectedAccount = EXPECTED_ACCOUNT;
+  status.profile = activeProfileKey || (isBrowserConnected() ? null : getDefaultProfileKey());
+  status.expectedAccount = expectedAccount;
 
   logger.info('Status check', status);
   return status;

@@ -6,6 +6,7 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { prepareDownload, findNewFiles, saveMetadata } from '../utils/file-manager.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { get } from '../utils/config.js';
+import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt } from '../browser/composer.js';
 import fs from 'fs';
@@ -66,6 +67,18 @@ export async function handleGenerateVideo(args) {
       campaign: args.campaign,
     });
 
+    // ensureProjectInContext only checks the project id in the URL, which still
+    // matches on a generation's /edit/{id} page — that page's composer has no
+    // Agent toggle at all, so ensureAgentOff below would fail outright. Navigate
+    // back to the project root first (see the matching fix in generate-image.js).
+    const preGenUrl = page.url();
+    if (preGenUrl.includes('/edit/')) {
+      const projectRootUrl = preGenUrl.split('/edit/')[0];
+      logger.info('On a generation edit page — navigating back to project root for fresh composer', { from: preGenUrl, to: projectRootUrl });
+      await page.goto(projectRootUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.waitForTimeout(1500);
+    }
+
     // Always generate from the plain bottom composer ("fresh" mode), never from an
     // open Agent-chat sidebar ("follow-up" mode) — see agent-settings.js.
     await closeSidebar(page);
@@ -92,7 +105,7 @@ export async function handleGenerateVideo(args) {
 
     if (settingsChanged) {
       logger.info('Applying video settings via Agent Settings UI panel', { model, ratio, quantity });
-      const applied = await applySettings(page, { model, ratio, quantity });
+      const applied = await applySettings(page, { model, ratio, quantity, mode: 'video' });
       lastAppliedVideoSettings = {
         model: applied.model || model,
         ratio: applied.ratio || ratio,
@@ -154,7 +167,7 @@ export async function handleGenerateVideo(args) {
     jobQueue.completeJob(job.id, {
       status: 'ready_for_confirmation',
       type: 'video',
-      account: get('expectedAccount'),
+      account: getActiveExpectedAccount(),
       model_used: model,
       ratio,
       duration,

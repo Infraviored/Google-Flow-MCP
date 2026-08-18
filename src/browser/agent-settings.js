@@ -20,10 +20,6 @@ export async function closeSidebar(page) {
   logger.info('Agent-chat sidebar (follow-up mode) is open, closing to force fresh composer mode');
   await closeBtn.click();
 
-  // Some sidebar variants (e.g. a brand-new project's first-load "Untitled
-  // session" welcome panel) take longer than a fixed 500ms to actually
-  // unmount — confirmed live the close succeeded but a single early check
-  // reported it as still open. Poll instead of checking once.
   let stillOpen = true;
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
@@ -40,16 +36,6 @@ export async function closeSidebar(page) {
   }
 }
 
-// The bottom composer ALSO has an independent "Agent" toggle (aria-pressed), on
-// top of the fresh/sidebar distinction above. Confirmed live: with Agent ON,
-// generation routes through Flow's own LLM copilot (conversational, stateful,
-// decides its own ratio/model/count from the prompt) and does NOT reliably
-// honor whatever the settings panel shows — this session repeatedly observed
-// 16:9 x2 output regardless of panel state while Agent was ON. With Agent OFF
-// ("one-shot"), the exact settings-menu selection is what gets sent. Agent OFF
-// is also the only mode with a settings surface whose changes are provably
-// live-applied (see applySettings below) — force it before every settings
-// read/write and every generation.
 function agentToggleLocator(page) {
   return page.locator('button:has(span.content:text-is("Agent"))').first();
 }
@@ -84,16 +70,15 @@ export async function ensureAgentOff(page) {
   }
 }
 
-// Agent-OFF settings surface: an inline trigger button that shows the current
-// state directly (e.g. "🍌 Nano Banana Pro [ratio icon] x2"), opening a Radix
-// dropdown menu (role="menu") — NOT a dialog with a Save button. Selections
-// apply live per click (confirmed live: a real click on the 16:9 tab flipped
-// aria-selected and updated the trigger's own label immediately). The nested
-// model sub-trigger has the same aria-haspopup="menu" + model-name text, so
-// once the menu is open it must be scoped to inside the open menu container to
-// avoid matching the still-visible outer trigger underneath it.
+// The composer's outer settings-summary trigger shows different text per
+// mode — Image mode shows the model name ("🍌 Nano Banana Pro …"), but Video
+// mode shows no model name at all, just "Video · {duration}s […] x{count}"
+// (confirmed live) — so both patterns must be matched here, not just model
+// names. This is only the CLOSED-state trigger; once the menu is open, the
+// nested model sub-dropdown always shows a real model name regardless of
+// mode (confirmed live) and is matched separately, scoped inside the menu.
 function inlineSettingsTriggerLocator(page) {
-  return page.locator('button[aria-haspopup="menu"]').filter({ hasText: /Nano|Banana|Omni|Veo|Imagen/ }).first();
+  return page.locator('button[aria-haspopup="menu"]').filter({ hasText: /Nano|Banana|Omni|Veo|Imagen|Video/ }).first();
 }
 
 function openMenuLocator(page) {
@@ -104,35 +89,45 @@ export async function isSettingsPanelOpen(page) {
   return await openMenuLocator(page).isVisible().catch(() => false);
 }
 
-export async function ensureSettingsPanelOpen(page) {
+export async function ensureSettingsPanelOpen(page, { mode = 'image' } = {}) {
   await ensureAgentOff(page);
-  if (await isSettingsPanelOpen(page)) return;
+  if (!(await isSettingsPanelOpen(page))) {
+    const trigger = inlineSettingsTriggerLocator(page);
+    const isVisible = await trigger.isVisible().catch(() => false);
+    if (!isVisible) {
+      throw new FlowError(
+        ErrorCodes.UNKNOWN_UI_CHANGE,
+        'Settings trigger button (model/ratio/count summary) not found in composer toolbar.'
+      );
+    }
 
-  const trigger = inlineSettingsTriggerLocator(page);
-  const isVisible = await trigger.isVisible().catch(() => false);
-  if (!isVisible) {
-    throw new FlowError(
-      ErrorCodes.UNKNOWN_UI_CHANGE,
-      'Settings trigger button (model/ratio/count summary) not found in composer toolbar.'
-    );
+    await trigger.click();
+    await page.waitForTimeout(400);
+
+    const opened = await isSettingsPanelOpen(page);
+    if (!opened) {
+      throw new FlowError(
+        ErrorCodes.UNKNOWN_UI_CHANGE,
+        'Clicked the settings trigger button, but the settings menu did not open.'
+      );
+    }
   }
 
-  await trigger.click();
-  await page.waitForTimeout(400);
-
-  const opened = await isSettingsPanelOpen(page);
-  if (!opened) {
-    throw new FlowError(
-      ErrorCodes.UNKNOWN_UI_CHANGE,
-      'Clicked the settings trigger button, but the settings menu did not open.'
-    );
+  // Ensure the correct mode tab (IMAGE vs VIDEO) inside the menu is active
+  const menu = openMenuLocator(page);
+  const targetLabel = mode === 'video' ? 'Video' : 'Image';
+  const modeTab = menu.locator('[role="tab"]').filter({ hasText: targetLabel }).first();
+  if (await modeTab.isVisible().catch(() => false)) {
+    const isSelected = (await modeTab.getAttribute('aria-selected')) === 'true';
+    if (!isSelected) {
+      logger.info(`Switching settings panel mode tab to ${targetLabel}`);
+      await modeTab.click();
+      await page.waitForTimeout(300);
+    }
   }
 }
 
 export async function closeSettingsPanel(page) {
-  // Close by re-clicking the trigger (toggle), never by clicking elsewhere —
-  // confirmed live that an outside click can land on a gallery tile underneath
-  // the menu and navigate away instead of just dismissing it.
   if (!(await isSettingsPanelOpen(page))) return;
   const trigger = inlineSettingsTriggerLocator(page);
   if (await trigger.isVisible().catch(() => false)) {
@@ -141,8 +136,8 @@ export async function closeSettingsPanel(page) {
   }
 }
 
-export async function readSettings(page) {
-  await ensureSettingsPanelOpen(page);
+export async function readSettings(page, { mode = 'image' } = {}) {
+  await ensureSettingsPanelOpen(page, { mode });
   const menu = openMenuLocator(page);
 
   const tabs = await menu.locator('[role="tab"]').all();
@@ -181,12 +176,13 @@ export async function readSettings(page) {
     ratio: activeRatio,
     quantity: activeQuantity,
     model: activeModel,
+    mode,
   };
 }
 
-export async function applySettings(page, { ratio, model, quantity }) {
-  logger.info('Applying settings via Agent-OFF settings menu', { ratio, model, quantity });
-  await ensureSettingsPanelOpen(page);
+export async function applySettings(page, { ratio, model, quantity, mode = 'image' }) {
+  logger.info('Applying settings via Agent-OFF settings menu', { ratio, model, quantity, mode });
+  await ensureSettingsPanelOpen(page, { mode });
   const menu = openMenuLocator(page);
 
   if (ratio) {
@@ -223,10 +219,6 @@ export async function applySettings(page, { ratio, model, quantity }) {
       await modelDropdown.click();
       await page.waitForTimeout(300);
 
-      // Excludes bare `button`: the dropdown trigger itself already displays the
-      // current model name as its label, so a generic button locator matches it
-      // too and .first() can grab the (already-open, overlay-covered) trigger
-      // instead of the actual menu item, hanging the click for the full timeout.
       const modelOption = page
         .locator('[role="menuitem"], [role="option"]')
         .filter({ hasText: model })
@@ -234,11 +226,8 @@ export async function applySettings(page, { ratio, model, quantity }) {
 
       if (await modelOption.isVisible().catch(() => false)) {
         await modelOption.click();
+        await page.waitForTimeout(300);
 
-        // Selecting a menu item closes the submenu via its own animation — poll
-        // rather than assume a fixed delay is enough. Never press Escape: it
-        // bubbles past the menu and can close the enclosing Agent-chat sidebar
-        // too (a separate, stateful panel) — a much bigger side effect.
         for (let i = 0; i < 5; i++) {
           await page.waitForTimeout(200);
           if (!(await modelOption.isVisible().catch(() => false))) break;
@@ -258,7 +247,7 @@ export async function applySettings(page, { ratio, model, quantity }) {
   }
 
   // Read back settings to verify they actually changed
-  const current = await readSettings(page);
+  const current = await readSettings(page, { mode });
 
   if (ratio && current.ratio !== ratio) {
     throw new FlowError(

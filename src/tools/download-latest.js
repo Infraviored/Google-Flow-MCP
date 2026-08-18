@@ -5,6 +5,8 @@ import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { resolveDownloadPath } from '../utils/file-manager.js';
 import { navigateToGeneration, listGenerations } from '../browser/gallery.js';
 import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 // Always surfaced on a successful download so the calling agent can't skip
 // it: report the exact path to the human, then ask (don't just do it)
@@ -72,38 +74,57 @@ export async function handleDownloadLatest(args = {}) {
         throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, '"2K / Upscaled" menu option not found');
       }
 
-      // Once Playwright is CDP-attached to a tab, it silently intercepts every
-      // download in that tab (automated OR manual) into its own temp artifact
-      // storage instead of letting Chrome write to the OS Downloads folder —
-      // confirmed live (a manual click had the identical symptom; Playwright's
-      // own download.path() pointed at /tmp/playwright-artifacts-.../, never
-      // ~/Downloads). Polling ~/Downloads for a new file can never see it.
-      // The correct way to get the file is Playwright's own download event.
-      const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
+      // Playwright's page.on('download')/download.saveAs() intercepts the
+      // download as a blob: URL and copies it via its own temp artifact —
+      // confirmed live (VibeVoice batch run) that copy can throw ENOENT
+      // ("no such file or directory, copyfile /tmp/playwright-artifacts-...")
+      // even though Chrome's own "Upscaling complete, downloaded!" toast
+      // fired, and on some profiles no leaked copy lands in ~/Downloads to
+      // fall back to either — the blob: URL itself also gets revoked by
+      // Chrome's own download handler shortly after, so refetching it from
+      // the page is an equally losing race. The reliable fix (confirmed live
+      // via a throwaway CDP script) is to bypass all of that and have Chrome
+      // itself write the file straight to disk via the DevTools Protocol.
+      const scratchDir = path.join(os.tmpdir(), 'flow-mcp-2k-downloads');
+      fs.mkdirSync(scratchDir, { recursive: true });
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: scratchDir, eventsEnabled: true });
+
+      let completed = null;
+      let canceled = false;
+      cdp.on('Browser.downloadProgress', (e) => {
+        if (e.state === 'completed') completed = e;
+        else if (e.state === 'canceled') canceled = true;
+      });
+
       await menu2kOption.click();
-      logger.info('Clicked 2K upscale download option, waiting for Playwright download event');
+      logger.info('Clicked 2K upscale download option, waiting for CDP download-completed event');
 
-      const download = await downloadPromise.catch(() => null);
-      if (!download) {
-        await takeScreenshot(page, '2k-download-timeout');
-        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, 'Timed out waiting for the 2K upscaled download to start');
+      const deadline = Date.now() + 60000;
+      while (!completed && !canceled && Date.now() < deadline) {
+        await page.waitForTimeout(300);
       }
-
-      const failure = await download.failure();
-      if (failure) {
-        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, `2K download failed: ${failure}`);
+      if (canceled) {
+        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, '2K download was canceled by the browser');
+      }
+      if (!completed) {
+        await takeScreenshot(page, '2k-download-timeout');
+        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, 'Timed out waiting for the 2K upscaled download to complete');
       }
 
       const { fullPath } = resolveDownloadPath('image', {
         filename: args.filename,
-        suggestedFilename: download.suggestedFilename(),
+        suggestedFilename: path.basename(completed.filePath),
         model: 'download-2k',
         jobId: `upscaled_2k_${Date.now()}`,
       });
-      await download.saveAs(fullPath);
+      // renameSync throws EXDEV across filesystems (scratchDir is /tmp,
+      // typically a different mount than the project's outputs/ dir).
+      fs.copyFileSync(completed.filePath, fullPath);
+      fs.unlinkSync(completed.filePath);
       const stat = fs.statSync(fullPath);
 
-      logger.info('2K upscaled file moved to project outputs', { fullPath, size: stat.size });
+      logger.info('2K upscaled file saved via CDP download to project outputs', { fullPath, size: stat.size });
       return {
         status: 'success',
         method: 'ui-upscale-2k',

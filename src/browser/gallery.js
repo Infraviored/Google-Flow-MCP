@@ -200,18 +200,26 @@ export async function navigateToGeneration(page, { id, url } = {}) {
   return page.url();
 }
 
-// Follow-up (in-place) edit on the generation currently open on an /edit/
-// page — same Slate composer as the bottom bar, confirmed live: clicking
-// Create there updates the image without navigating away from /edit/{id}.
-// Caller must already be on an /edit/ page (checked here, not silently
-// handled — navigating there is a distinct, explicit step via
-// navigateToGeneration).
-export async function followUpEdit(page, instruction, { timeoutMs } = {}) {
-  if (!/\/edit\//.test(page.url())) {
-    throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
-      'followUpEdit requires the page to already be on a generation\'s /edit/ page.');
-  }
+// The edit-page composer ("What do you want to change?") has no ratio/
+// settings control at all in its DOM (confirmed live) — applySettings can't
+// lock the aspect ratio the way it does for fresh generations. Read the main
+// hero <img>'s natural pixel size (same "img.width > 100" filter used in
+// download-latest.js to pick the hero image over thumbnail-strip images) so
+// followUpEdit can detect when Flow silently changed the canvas shape.
+async function getMainPreviewImageSize(page) {
+  return await page.evaluate(() => {
+    const imgs = Array.from(document.querySelectorAll('img'));
+    let best = null;
+    for (const img of imgs) {
+      if (img.width > 100 && img.naturalWidth > 0 && (!best || img.width > best.width)) {
+        best = { width: img.naturalWidth, height: img.naturalHeight };
+      }
+    }
+    return best;
+  }).catch(() => null);
+}
 
+async function clickCreateAndWait(page, instruction, timeoutMs) {
   const promptInput = await getPromptInput(page);
   if (!promptInput) {
     throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE, 'Could not find the follow-up edit composer on the edit page.');
@@ -232,6 +240,51 @@ export async function followUpEdit(page, instruction, { timeoutMs } = {}) {
   if (newIds.length === 0) {
     throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
       'Follow-up edit completed but no new media was detected in the DOM.');
+  }
+  return newIds;
+}
+
+// Follow-up (in-place) edit on the generation currently open on an /edit/
+// page — same Slate composer as the bottom bar, confirmed live: clicking
+// Create there updates the image without navigating away from /edit/{id}.
+// Caller must already be on an /edit/ page (checked here, not silently
+// handled — navigating there is a distinct, explicit step via
+// navigateToGeneration).
+export async function followUpEdit(page, instruction, { timeoutMs } = {}) {
+  if (!/\/edit\//.test(page.url())) {
+    throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
+      'followUpEdit requires the page to already be on a generation\'s /edit/ page.');
+  }
+
+  const beforeSize = await getMainPreviewImageSize(page);
+  let newIds = await clickCreateAndWait(page, instruction, timeoutMs);
+  const afterSize = await getMainPreviewImageSize(page);
+
+  // Confirmed live: the edit composer can silently change the canvas's
+  // aspect ratio (2048x2048 -> 2816x1536 on an otherwise-identical instruction),
+  // breaking anything downstream that assumes the follow-up preserves shape
+  // (e.g. paired white/black background generations that must be pixel-
+  // dimension-identical). Retry once with an explicit ratio-lock clause
+  // appended before giving up — this fixed it reliably in practice.
+  const ratioChanged = beforeSize && afterSize &&
+    Math.abs((beforeSize.width / beforeSize.height) - (afterSize.width / afterSize.height)) > 0.01;
+
+  if (ratioChanged) {
+    logger.warn('Follow-up edit changed the image aspect ratio — retrying once with an explicit ratio-lock clause', {
+      instruction, beforeSize, afterSize,
+    });
+    const lockedInstruction = `${instruction} Keep the exact same aspect ratio and pixel dimensions as the image before this edit — do not change the canvas shape.`;
+    newIds = await clickCreateAndWait(page, lockedInstruction, timeoutMs);
+    const retrySize = await getMainPreviewImageSize(page);
+    const stillChanged = beforeSize && retrySize &&
+      Math.abs((beforeSize.width / beforeSize.height) - (retrySize.width / retrySize.height)) > 0.01;
+    if (stillChanged) {
+      throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
+        `Follow-up edit changed the image aspect ratio even after a ratio-lock retry ` +
+        `(before: ${beforeSize.width}x${beforeSize.height}, after: ${retrySize.width}x${retrySize.height}). ` +
+        `The edit was still applied (new_media_ids below) — caller must decide whether to keep or discard it.`,
+        { newMediaIds: newIds, beforeSize, afterSize: retrySize });
+    }
   }
 
   return newIds;

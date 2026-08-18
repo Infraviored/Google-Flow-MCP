@@ -32,11 +32,33 @@ export async function getPromptInput(page, { timeoutMs = 5000 } = {}) {
   return null;
 }
 
+// Confirmed live: Flow enforces a 1400-character prompt limit, for both
+// image and video composers. Over that, the composer silently refuses/never
+// finishes accepting input rather than erroring — fail loud before typing
+// instead of timing out mid-type.
+export const PROMPT_CHAR_LIMIT = 1400;
+
 export async function fillPrompt(page, promptInput, text) {
+  // promptInput.type() sends real keydown events per character. In Flow's
+  // Slate-based composer, Enter submits (like a chat input) rather than
+  // inserting a newline — any \n in `text` fires Generate early with
+  // whatever partial prompt had been typed so far. Collapse all whitespace
+  // (including newlines) to single spaces before typing; line breaks carry
+  // no prompt-semantic meaning here.
+  const singleLine = text.replace(/\s+/g, ' ').trim();
+  if (singleLine.length > PROMPT_CHAR_LIMIT) {
+    throw new FlowError(
+      ErrorCodes.INVALID_PARAMS,
+      `Prompt is ${singleLine.length} characters — Flow enforces a ${PROMPT_CHAR_LIMIT}-character limit. Shorten to ${PROMPT_CHAR_LIMIT} chars or fewer and retry.`
+    );
+  }
   await promptInput.click();
   await promptInput.fill('');
   await page.waitForTimeout(200);
-  await promptInput.type(text, { delay: 15 });
+  // delay: 15ms/char blows past Playwright's default 30s action timeout on
+  // long prompts (confirmed live: a ~1900-char prompt timed out) — drop the
+  // per-char delay to 5ms and set an explicit generous timeout to match.
+  await promptInput.type(singleLine, { delay: 5, timeout: 60000 });
   await page.waitForTimeout(500);
 }
 

@@ -111,6 +111,16 @@ class JobQueue {
     return this.currentJob;
   }
 
+  // Escape hatch for a job that never called completeJob/failJob on some exit
+  // path (a real bug elsewhere) — without this, a single-slot, in-memory
+  // queue like this one stays stuck for the rest of the process's life with
+  // no way to recover except restarting the whole MCP server.
+  forceReset() {
+    if (!this.currentJob) return null;
+    const stuck = this.currentJob;
+    return this.failJob(stuck.id, 'Force-reset via flow_queue_reset — job never completed or failed on its own.');
+  }
+
   getCompletedJobs() {
     return [...this.jobs.values()].filter(j => j.status === 'completed');
   }

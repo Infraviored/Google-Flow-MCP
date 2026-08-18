@@ -1,16 +1,22 @@
 import { logger } from '../utils/logger.js';
-import { get } from '../utils/config.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { getPage } from './connect.js';
 
-const EXPECTED_ACCOUNT = get('expectedAccount', 'your-email@gmail.com');
-
-export async function verifyAccount() {
+// expectedAccount is passed in by the caller (resolved from config's
+// profiles[activeProfileKey].expectedAccount — see launch-profile.js's
+// getActiveExpectedAccount()), not read from a fixed module-level constant.
+// This module is a pure DOM-reading utility with no config knowledge of its
+// own; whoever calls it decides what "expected" means for the profile
+// currently in use. expectedAccount=null (unknown/new profile) behaves the
+// same as enforceExpected=false — nothing to violate, just report whatever
+// is found.
+export async function verifyAccount({ expectedAccount = null, enforceExpected = true } = {}) {
+  const enforce = enforceExpected && !!expectedAccount;
   const page = getPage();
   const currentUrl = page.url();
 
-  logger.info('Verifying Google account on Flow', { expectedAccount: EXPECTED_ACCOUNT });
+  logger.info('Verifying Google account on Flow', { expectedAccount, enforce });
 
   try {
     // 1. Check if page is sitting on Google OAuth sign-in page
@@ -40,15 +46,20 @@ export async function verifyAccount() {
     const accountChip = await page.$('[data-account-email], [aria-label*="gmail"], [data-test-id*="account"]');
     if (accountChip) {
       const text = await accountChip.textContent();
-      if (text && text.includes(EXPECTED_ACCOUNT)) {
-        logger.info('Account verified via UI chip', { account: EXPECTED_ACCOUNT });
-        return { verified: true, account: EXPECTED_ACCOUNT, method: 'ui-chip' };
+      if (text && expectedAccount && text.includes(expectedAccount)) {
+        logger.info('Account verified via UI chip', { account: expectedAccount });
+        return { verified: true, account: expectedAccount, method: 'ui-chip' };
       }
-      if (text && text.includes('@gmail.com') && !text.includes(EXPECTED_ACCOUNT)) {
+      if (text && text.includes('@gmail.com') && !(expectedAccount && text.includes(expectedAccount))) {
+        const match = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+        if (!enforce) {
+          logger.info('Account verified via UI chip (no fixed expectation enforced)', { account: match?.[0] });
+          return { verified: true, account: match?.[0] || text.trim(), method: 'ui-chip' };
+        }
         await takeScreenshot(page, 'wrong-account');
         throw new FlowError(
           ErrorCodes.WRONG_GOOGLE_ACCOUNT,
-          `Wrong Google account detected. Expected ${EXPECTED_ACCOUNT}, found account with: ${text.trim()}`
+          `Wrong Google account detected. Expected ${expectedAccount}, found account with: ${text.trim()}`
         );
       }
     }
@@ -66,14 +77,18 @@ export async function verifyAccount() {
         return null;
       });
       if (emailFromNext) {
-        if (emailFromNext === EXPECTED_ACCOUNT) {
+        if (expectedAccount && emailFromNext === expectedAccount) {
           logger.info('Account verified via __NEXT_DATA__', { account: emailFromNext });
           return { verified: true, account: emailFromNext, method: 'next-data' };
         } else if (emailFromNext.includes('@')) {
+          if (!enforce) {
+            logger.info('Account verified via __NEXT_DATA__ (no fixed expectation enforced)', { account: emailFromNext });
+            return { verified: true, account: emailFromNext, method: 'next-data' };
+          }
           await takeScreenshot(page, 'wrong-account');
           throw new FlowError(
             ErrorCodes.WRONG_GOOGLE_ACCOUNT,
-            `Wrong Google account detected in session. Expected ${EXPECTED_ACCOUNT}, found: ${emailFromNext}`
+            `Wrong Google account detected in session. Expected ${expectedAccount}, found: ${emailFromNext}`
           );
         }
       }
@@ -89,8 +104,13 @@ export async function verifyAccount() {
     }).catch(() => false);
 
     if (hasProfileAvatar) {
-      logger.info('Signed-in profile avatar found in app shell', { account: EXPECTED_ACCOUNT });
-      return { verified: true, account: EXPECTED_ACCOUNT, method: 'profile-avatar' };
+      // This fallback only detects THAT someone is signed in, not WHO —
+      // reporting expectedAccount here is a guess, reasonable when we have
+      // one to guess, but there's genuinely no way to confirm it from this
+      // fallback alone.
+      const account = expectedAccount || 'unknown (signed in, but email not read by this fallback)';
+      logger.info('Signed-in profile avatar found in app shell', { account });
+      return { verified: true, account, method: 'profile-avatar' };
     }
 
     logger.info('Account verification unconfirmed (not logged in or no avatar/chip found)', {

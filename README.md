@@ -109,14 +109,21 @@ Edit `config/flow.config.json`:
 
 ```json
 {
-  "expectedAccount": "your.email@gmail.com",
-  "chromeProfile": "Profile 1",
+  "defaultProfile": "your-label",
+  "profiles": {
+    "your-label": {
+      "sourceProfile": "Profile 1",
+      "expectedAccount": "your.email@gmail.com"
+    }
+  },
   "chromeUserDataDir": "/home/you/.config/google-chrome"
 }
 ```
 
+`profiles` is the single source of truth for every account this tool knows about — `defaultProfile` picks which entry `flow_connect` uses when you don't pass a `profile` arg. `your-label` is just a name you choose (no requirement to be an email or match anything). You never have to hand-edit this beyond the first entry — see "Adding another Google account" below; new profiles register themselves here automatically the first time they connect successfully.
+
 > 💡 **Finding your Chrome profile:**  
-> Open Chrome and go to `chrome://version/`. Look for **"Profile Path"** — the last folder name is your profile (e.g., `Profile 1`), and the path before it is your `chromeUserDataDir`. This is only used as a one-time seed — see below.
+> Open Chrome and go to `chrome://version/`. Look for **"Profile Path"** — the last folder name is your profile (e.g., `Profile 1`), and the path before it is your `chromeUserDataDir`. `sourceProfile` is only used as a one-time seed — see below.
 
 > ⚠️ Nothing here needs to already be signed into Flow — the first `flow_connect` call handles that (next step).
 
@@ -132,7 +139,31 @@ chmod +x scripts/*.sh
 ./scripts/start-mcp.sh
 ```
 
-There is no separate "launch Chrome first" step — `flow_connect` launches Chrome itself, from a **persistent** profile (`chrome-profile-kiara/` in this repo, gitignored), seeded once from the source profile above. The very first `flow_connect` call needs a VISIBLE window (don't pass `headless`/`virtual_display`) so you can click your Google account in the account-chooser and complete 2FA if prompted — a one-time thing. Every `flow_connect` call after that reuses the same authenticated session automatically, in any display mode, with no further sign-in.
+There is no separate "launch Chrome first" step — `flow_connect` launches Chrome itself, from a **persistent** profile (`chrome-profile-{profile}/` in this repo, gitignored — one per entry in config's `profiles` map). The very first `flow_connect` call for a given profile needs a VISIBLE window (don't pass `headless`/`virtual_display`) so you can click your Google account in the account-chooser and complete 2FA if prompted — a one-time thing, unless seeded from `sourceProfile` (see below), which skips it entirely. Every `flow_connect` call after that reuses the same authenticated session automatically, in any display mode, with no further sign-in.
+
+#### Adding another Google account
+
+Each account gets its own independent, isolated Chrome profile — never your real everyday Chrome profile directly (see "why isolated copies, not your real profile" below). Two ways to set one up — **you never have to hand-edit `config/flow.config.json`'s `profiles` map**; a successful connect writes its own entry there automatically, backing up the previous config first:
+
+**A) Fresh sign-in through this tool** (simplest, but needs one manual step):
+```
+flow_connect({ profile: "some-label", headless: false, virtual_display: false })
+```
+Pick any `profile` label you like — it's just a directory name, no requirement to be an email or match anything. This opens a real visible Chrome window on Google's account-chooser; sign into whichever account you want, complete 2FA if prompted, then re-run `flow_connect` with the same `profile` key. The moment the account is verified, its email is written into `config.profiles["some-label"]` automatically. Every call after that reuses it automatically.
+
+**B) Seed from an already-signed-in system Chrome profile** (no manual step at connect time, but requires prep in your *real* Chrome first):
+1. In your real Chrome, create a new profile (Chrome's own profile picker → "Add") and sign into the Google account you want to use.
+2. **While still in that profile**, visit **https://labs.google/fx/tools/flow** and accept Flow's terms/contract once — otherwise the seeded copy will land on the same one-time contract-acceptance screen the very first time you use it.
+3. Find that profile's directory name: go to `chrome://version/` in it and read **"Profile Path"** — the last folder name (e.g. `Profile 3`) is what you need.
+4. Hand that name to `flow_connect` as `source_profile`, along with your own chosen `profile` label — only needed this once:
+   ```
+   flow_connect({ profile: "some-label", source_profile: "Profile 3", virtual_display: true })
+   ```
+   This copies that system profile's session into its own `chrome-profile-some-label/` — no interactive sign-in needed, works headed or on a virtual display right away. On success, `config.profiles["some-label"] = { sourceProfile: "Profile 3", expectedAccount: "<discovered email>" }` gets written automatically — future connects need only `{ profile: "some-label" }`, no `source_profile` required again (useful if the persistent copy ever needs re-seeding after being deleted).
+
+**Why an isolated copy instead of automating your real profile directly?** Chrome won't run two instances against the same profile directory at once (`SingletonLock`) — pointing automation straight at your daily-driver profile would either fail to start or force-close your real browser. The copy is a one-time snapshot at connect time (not a live sync), so your real profile is never touched again afterward and automation flags never bleed into your everyday browsing fingerprint.
+
+Switching `profile` on a later call automatically closes whatever's running and relaunches under the requested one. Once a profile has a recorded `expectedAccount`, future connects under that same key verify against it and fail loud on a mismatch; a brand-new profile with nothing recorded yet just reports whichever account is found.
 
 ### 5️⃣ Register with OpenCode
 

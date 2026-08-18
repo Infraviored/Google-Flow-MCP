@@ -4,11 +4,15 @@ import { jobQueue } from '../queue/job-queue.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { get } from '../utils/config.js';
+import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { detectPageElements } from '../browser/safe-actions.js';
 import { saveMetadata } from '../utils/file-manager.js';
 import { ensureProjectInContext, navigateToSidebar } from '../navigation/project-navigator.js';
+import { getPromptInput, fillPrompt, clickGenerateButton } from '../browser/composer.js';
+import { applySettings } from '../browser/agent-settings.js';
 
 export async function handleCreateCharacter(args) {
+  const autoConfirm = args.auto_confirm === true;
   const job = jobQueue.createJob('create_character', {
     ...args,
     project_name: args.project_name,
@@ -30,80 +34,88 @@ export async function handleCreateCharacter(args) {
     await navigateToSidebar(page, 'Characters');
     await page.waitForTimeout(2000);
 
-    await takeScreenshot(page, 'characters-section');
-
-    // Look for "New Character" button
-    const newCharLocator = page.locator(
-      'button:has-text("New Character"), button:has-text("New character"), button:has-text("Create"), text=New Character'
-    ).first();
-
-    if (!await newCharLocator.isVisible().catch(() => false)) {
-      const elements = await detectPageElements(page);
-      return {
-        status: 'ui_discovered',
-        message: 'Characters section opened. New Character button not auto-detected.',
-        elements: {
-          buttons: elements.buttons.map(b => b.text),
-          inputs: elements.inputs,
-        },
-        screenshot: await takeScreenshot(page, 'characters-ui'),
-      };
+    const description = args.description || args.prompt || '';
+    if (!description) {
+      throw new FlowError(
+        ErrorCodes.INVALID_PARAMS,
+        'Character description is required.'
+      );
     }
 
-    await newCharLocator.click();
-    await page.waitForTimeout(1500);
+    // Reuse composer.js helper to locate prompt input on the Characters page
+    const promptInput = await getPromptInput(page);
+    if (!promptInput) {
+      await takeScreenshot(page, 'no-character-prompt-input');
+      throw new FlowError(
+        ErrorCodes.UNKNOWN_UI_CHANGE,
+        'Could not find character description prompt input on Characters page.'
+      );
+    }
 
     // Fill character description
-    const descLocator = page.locator(
-      'textarea, [contenteditable="true"], input[placeholder*="cribe"], input[placeholder*="description"]'
-    ).first();
-    if (await descLocator.isVisible().catch(() => false)) {
-      await descLocator.click();
-      await descLocator.fill('');
-      await page.waitForTimeout(200);
-      await descLocator.type(args.description, { delay: 20 });
-    }
+    await fillPrompt(page, promptInput, description);
 
-    // Upload reference image if provided
-    if (args.reference_image) {
-      const fileLocator = page.locator('input[type="file"]').first();
-      if (await fileLocator.isVisible().catch(() => false)) {
-        await fileLocator.setInputFiles(args.reference_image);
-        await page.waitForTimeout(2000);
-        logger.info('Reference image uploaded');
+    // Apply model if specified
+    if (args.model) {
+      try {
+        await applySettings(page, { model: args.model });
+      } catch (err) {
+        logger.warn('Could not apply model setting for character', { error: err.message });
       }
     }
 
-    // Try to select model
-    if (args.model) {
-      try {
-        const modelLocator = page.locator(`button:has-text("${args.model}")`).first();
-        if (await modelLocator.isVisible().catch(() => false)) {
-          await modelLocator.click();
-          await page.waitForTimeout(500);
-        }
-      } catch { /* ok */ }
+    // Upload reference image if provided
+    const refFile = args.reference_image || (args.reference_images && args.reference_images[0]);
+    if (refFile) {
+      const fileLocator = page.locator('input[type="file"]').first();
+      if (await fileLocator.isVisible().catch(() => false)) {
+        await fileLocator.setInputFiles(refFile);
+        await page.waitForTimeout(2000);
+        logger.info('Reference image uploaded for character', { refFile });
+      }
     }
 
-    await takeScreenshot(page, 'character-ready');
+    // Credit-spend gate: auto_confirm determines if we click Create
+    if (!autoConfirm) {
+      const setupScreenshot = await takeScreenshot(page, 'character-ready-for-confirmation');
+      const result = {
+        status: 'ready_for_confirmation',
+        type: 'character',
+        message: 'Character description and settings filled. No credits spent. Call again with auto_confirm=true to create.',
+        description,
+        account: getActiveExpectedAccount(),
+        screenshot: setupScreenshot,
+        jobId: job.id,
+      };
+      jobQueue.completeJob(job.id, result);
+      return result;
+    }
+
+    // Confirmed path: Click Create button via composer.js helper
+    logger.info('auto_confirm=true — clicking Create button for character');
+    await clickGenerateButton(page);
+    await page.waitForTimeout(3000);
+
+    const finalScreenshot = await takeScreenshot(page, 'character-created');
 
     saveMetadata(job.id, {
       type: 'character',
-      description: args.description,
+      description,
       model: args.model,
-      referenceImage: args.reference_image,
+      referenceImage: refFile,
       projectName: args.project_name,
       campaign: args.campaign,
       jobId: job.id,
-      status: 'ready_for_confirmation',
+      status: 'created',
     });
 
     jobQueue.completeJob(job.id, {
-      status: 'ready_for_confirmation',
+      status: 'success',
       type: 'character',
-      description: args.description,
-      message: 'Character setup complete. Manual confirmation needed to create.',
-      screenshot: await takeScreenshot(page, 'character-ready'),
+      description,
+      account: getActiveExpectedAccount(),
+      message: 'Character creation initiated successfully.',
+      screenshot: finalScreenshot,
     });
 
     return jobQueue.getJob(job.id).result;

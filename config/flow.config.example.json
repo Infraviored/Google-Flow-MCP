@@ -1,8 +1,13 @@
 {
   "flowHome": ".",
   "flowUrl": "https://labs.google/fx/en/tools/flow",
-  "expectedAccount": "your-email@gmail.com",
-  "chromeProfile": "Profile 1",
+  "defaultProfile": "default-account-label",
+  "profiles": {
+    "default-account-label": {
+      "sourceProfile": "Profile 1",
+      "expectedAccount": "your-email@gmail.com"
+    }
+  },
   "chromeUserDataDir": "/path/to/chrome/user-data",
   "cdpPort": 9222,
   "jobTimeoutMs": 300000,

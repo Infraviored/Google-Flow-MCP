@@ -8,22 +8,20 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { logger } from './utils/logger.js';
-import { launchKiaraProfile, navigateToFlow } from './browser/launch-profile.js';
-import { getPage, getBrowser, setBrowser, closeBrowser as closeBrowserConnection } from './browser/connect.js';
+import { launchKiaraProfile, navigateToFlow, getDefaultProfileKey, getProfileEntry, getAllProfiles } from './browser/launch-profile.js';
+import { getPage, getBrowser, setBrowser, closeBrowser as closeBrowserConnection, getActiveProfileKey } from './browser/connect.js';
 import { verifyAccount as checkAccount } from './browser/account-check.js';
+import { updateConfig } from './utils/config.js';
 import { handleFlowOpen } from './tools/flow-open.js';
 import { handleFlowStatus } from './tools/flow-status.js';
 import { handleGenerateImage } from './tools/generate-image.js';
 import { handleGenerateVideo } from './tools/generate-video.js';
 import { handleDownloadLatest } from './tools/download-latest.js';
 import { handleCreateCharacter } from './tools/create-character.js';
-import { handleImportCharacter } from './tools/import-character.js';
 import { handleOpenCharacters } from './tools/open-characters.js';
-import { handleCreateScene } from './tools/create-scene.js';
 import { handleOpenToolsGallery } from './tools/open-tools-gallery.js';
 import { handleUseGridArchitect } from './tools/grid-architect.js';
 import { handleDiscoverUi } from './tools/discover-ui.js';
-import { handleUseFlowTool } from './tools/use-flow-tool.js';
 import { handleGetSettings } from './tools/get-settings.js';
 import { handleChangeSettings } from './tools/change-settings.js';
 import { handleListGenerations } from './tools/list-generations.js';
@@ -37,7 +35,7 @@ import path from 'path';
 const TOOL_DEFINITIONS = [
   {
     name: 'flow_connect',
-    description: 'Launch Chrome, connect CDP, navigate to Google Flow, and verify account. Chrome runs from a PERSISTENT profile (chrome-profile-kiara/, seeded once from your real profile) — first-ever connect needs one manual step (click your account in Google\'s account-chooser, possibly a 2FA prompt) in a VISIBLE window; every connect after that reuses the saved session automatically, no window needed. Three display modes exist — ASK THE USER which one they want before the first connect of a session, do not silently assume: (1) headed (default, headless=false/virtual_display=false) — a real visible window, needed for that first-time manual step; (2) virtual_display=true — a real headed Chrome (same rendering fingerprint, same low bot-detection risk as headed) rendered on an off-screen Xvfb display instead of the user\'s real screen, so it never steals their mouse/keyboard/focus — use this for unattended/background work once the profile is already authenticated; (3) headless=true — fastest, but Flow\'s generation/upscale actions are reCAPTCHA-gated and headless Chrome scores noticeably worse on bot-detection, so this is the riskiest option and not recommended for anything that spends credits.',
+    description: `Launch Chrome, connect CDP, navigate to Google Flow, and verify account. Chrome runs from a PERSISTENT profile (chrome-profile-{profile}/, default profile key "${getDefaultProfileKey()}") — first-ever connect under a given profile needs one manual step (click your account in Google's account-chooser, possibly a 2FA prompt) in a VISIBLE window, unless source_profile seeds it from an already-signed-in system Chrome profile instead; every connect after that reuses the saved session automatically, no window needed. Three display modes exist — ASK THE USER which one they want before the first connect of a session, do not silently assume: (1) headed (default, headless=false/virtual_display=false) — a real visible window, needed for that first-time manual step; (2) virtual_display=true — a real headed Chrome (same rendering fingerprint, same low bot-detection risk as headed) rendered on an off-screen Xvfb display instead of the user's real screen, so it never steals their mouse/keyboard/focus — use this for unattended/background work once the profile is already authenticated; (3) headless=true — fastest, but Flow's generation/upscale actions are reCAPTCHA-gated and headless Chrome scores noticeably worse on bot-detection, so this is the riskiest option and not recommended for anything that spends credits. Multiple Google accounts: pass a distinct \`profile\` key (any label — no requirement to be an email or match anything) to get a fully separate, independently-persistent Chrome profile — see source_profile for the two ways to populate it. Switching \`profile\` on a call while a browser is alive under a different profile automatically closes it and relaunches under the new one.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -45,6 +43,8 @@ const TOOL_DEFINITIONS = [
         virtual_display: { type: 'boolean', description: 'Run headed Chrome on an off-screen Xvfb display instead of the user\'s real screen — same bot-detection profile as a normal visible window, but doesn\'t take over their mouse/keyboard. Recommended for unattended work once already authenticated. Ask the user before using this too.', default: false },
         open_flow: { type: 'boolean', description: 'Auto-navigate to Google Flow after connection.', default: true },
         project_id: { type: 'string', description: 'Navigate straight into this project (from flow_list_projects) instead of the Flow homepage. Skips the homepage hop entirely.' },
+        profile: { type: 'string', description: `Persistent profile key selecting which chrome-profile-{key}/ directory (and therefore which Google account) to use. Just a label — no requirement to be an email or match anything. Default "${getDefaultProfileKey()}" is the original profile seeded from config's profiles map. Any other value gets its own brand-new, independently-persistent profile — use this to run under a second Google account (e.g. to work around a per-account daily generation quota). No account-mismatch verification is enforced for non-default profiles — whichever account is signed in there is accepted as-is.`, default: getDefaultProfileKey() },
+        source_profile: { type: 'string', description: 'Only used with a non-default `profile`. Name of an EXISTING, already-signed-in system Chrome profile DIRECTORY (under ~/.config/google-chrome/, e.g. "Default" or "Profile 2" — not an email address) to seed the new persistent profile from, carrying over its already-authenticated Google session with no interactive sign-in step. Recommended: before handing over this profile path, sign in AND visit https://labs.google/fx/tools/flow in that system profile once to accept Flow\'s terms — otherwise the seeded copy will land on the same one-time contract-acceptance screen. Omit source_profile to start that profile completely empty instead (interactive sign-in required on first connect).' },
       },
     },
   },
@@ -65,7 +65,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_account_check',
-    description: 'Verify the logged-in Google account in the current browser session matches expectedAccount in config/flow.config.json.',
+    description: 'Verify the logged-in Google account in the current browser session matches the expectedAccount recorded in config/flow.config.json for the currently-active profile (profiles[activeProfileKey].expectedAccount).',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -81,11 +81,11 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_generate_image',
-    description: 'WARNING: image generation SPENDS CREDITS. Always auto-detects and forces the plain bottom composer ("fresh" mode) first, closing any open follow-up Agent-chat sidebar — settings and output count are only reliable in fresh mode. Default (auto_confirm=false): fills the prompt, selects model/ratio, and returns "ready_for_confirmation" without clicking Generate — no credits spent. With auto_confirm=true: first verifies the UI is in IMAGE mode (not Video) and that the model is an image model, THEN clicks Generate, waits for the images and downloads them, and returns their editIds/editUrls for use with flow_open_generation/flow_edit_generation/flow_download_latest. Image models only.',
+    description: 'WARNING: image generation SPENDS CREDITS. Always auto-detects and forces the plain bottom composer ("fresh" mode) first, closing any open follow-up Agent-chat sidebar — settings and output count are only reliable in fresh mode. This means every call starts a BRAND-NEW, BLANK generation with ZERO reference to any prior image — there is no "current image" behind this composer, so a prompt like "now change the background to black" has nothing to act on and will just generate an unrelated fresh image (silent contamination, not an error). To revise/re-render an EXISTING generation in place (e.g. a black-background pass of a white-background image you already made) — do NOT call this tool again. Call flow_edit_generation with that generation\'s id instead; that is the only tool that actually opens and edits a specific prior image. Default (auto_confirm=false): fills the prompt, selects model/ratio, and returns "ready_for_confirmation" without clicking Generate — no credits spent. With auto_confirm=true: first verifies the UI is in IMAGE mode (not Video) and that the model is an image model, THEN clicks Generate, waits for the images and downloads them, and returns their editIds/editUrls for use with flow_open_generation/flow_edit_generation/flow_download_latest. Image models only.',
     inputSchema: {
       type: 'object',
       properties: {
-        prompt: { type: 'string', description: 'The text prompt for image generation.' },
+        prompt: { type: 'string', description: 'The text prompt for image generation. HARD LIMIT: 1400 characters (Flow-enforced) — the tool throws before typing if exceeded; shorten and retry rather than trimming blind.' },
         model: { type: 'string', description: 'Model to use: Nano Banana Pro, Nano Banana 2, or Nano Banana 2 Lite.', default: 'Nano Banana 2' },
         auto_confirm: { type: 'boolean', description: 'CREDITS. If false (default): prepares only, spends nothing. If true: verifies Image mode is active, THEN clicks Generate (spends credits).', default: false },
         ratio: { type: 'string', description: 'Aspect ratio: 1:1, 16:9, 9:16, 4:3, 3:4.', default: '1:1' },
@@ -104,7 +104,7 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        prompt: { type: 'string', description: 'The text prompt for video generation.' },
+        prompt: { type: 'string', description: 'The text prompt for video generation. HARD LIMIT: 1400 characters (Flow-enforced) — the tool throws before typing if exceeded; shorten and retry rather than trimming blind.' },
         model: { type: 'string', description: 'Model: Omni Flash, Veo 2, Nano Banana 2.', default: 'Omni Flash' },
         ratio: { type: 'string', description: 'Aspect ratio: 16:9, 9:16, 1:1.', default: '16:9' },
         duration: { type: 'number', description: 'Target duration in seconds.', default: 5 },
@@ -140,7 +140,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_create_character',
-    description: 'Create a new character in Google Flow Characters with name and description. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously (check the result/a screenshot) before relying on it.',
+    description: 'Create a new character in Google Flow Characters with name and description. Uses the same Slate composer pattern as flow_generate_image. Default (auto_confirm=false): fills the description, returns "ready_for_confirmation" without spending credits. With auto_confirm=true: clicks Create (spends credits).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -155,73 +155,32 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
-    name: 'flow_import_character',
-    description: 'Import a character from a saved JSON file into Google Flow. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously before relying on it.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        file_path: { type: 'string', description: 'Path to character JSON file.' },
-      },
-      required: ['file_path'],
-    },
-  },
-  {
     name: 'flow_open_characters',
     description: 'Open the Google Flow Characters page and list existing characters. UNVERIFIED: predates this session\'s live-testing work — test cautiously before relying on it.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
-    name: 'flow_create_scene',
-    description: 'Create a new scene in Google Flow Scenes with characters and prompt. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously before relying on it.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        prompt: { type: 'string', description: 'Scene description/prompt.' },
-        characters: { type: 'array', items: { type: 'string' }, description: 'Character names to include in the scene.' },
-        project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
-        project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
-        campaign: { type: 'string', description: 'Campaign identifier for project matching (e.g., "ete-2026", "nouvelle-collection").' },
-      },
-      required: ['prompt'],
-    },
-  },
-  {
     name: 'flow_open_tools_gallery',
-    description: 'Open the Google Flow Tools Gallery and list available tools. UNVERIFIED: predates this session\'s live-testing work — test cautiously before relying on it.',
+    description: 'Open the Google Flow Tools Gallery (My Tools / Community / Templates) for the current project and list available tools. Confirmed live this session — lands on the real project-scoped Explore Tools page.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flow_use_grid_architect',
-    description: 'Open Grid Architect in Google Flow, fill theme prompt, shot prompts, engine, ratio, and visual logic settings. Supports batch shot generation for brand campaigns. UNVERIFIED: predates this session\'s live-testing work and has not been confirmed to still work against the current Flow UI — test cautiously before relying on it.',
+    description: 'Open Grid Architect (a built-in Flow template, found under Tools → Templates) and create a personal remix of it, landing on its /tool/{uuid} config page. The tool\'s entire UI runs inside a sandboxed <iframe title="Applet preview"> — confirmed live, this is why earlier versions of this tool could never find "Start Architecting" or any config field, they were only looking at the top-level page. Now navigates the iframe, sets ENGINE/FORMAT RATIO/VISUAL LOGIC, picks Unified Theme mode (single theme_prompt) or Sequence mode (per-shot shot_prompts, up to 4 slots — extras are dropped with a warning), and fills the prompt(s). Default (auto_confirm=false): configures everything and returns "ready_for_confirmation" without clicking Generate — no credits spent. With auto_confirm=true: clicks Generate. CAUTION: reference-image upload (the "+" under GLOBAL REFERENCES, and each shot\'s "+ COMPOSITION") is NOT wired up — the `references` param is accepted but currently ignored (a warning is logged); no <input type="file"> exists anywhere in the DOM for this control, so the actual upload mechanism is still unmapped.',
     inputSchema: {
       type: 'object',
       properties: {
-        theme_prompt: { type: 'string', description: 'Overall theme prompt for the grid.' },
-        shot_prompts: { type: 'array', items: { type: 'string' }, description: 'Array of individual shot prompts for the grid.' },
-        engine: { type: 'string', description: 'Engine/model for the grid.', default: 'Nano Banana 2' },
-        ratio: { type: 'string', description: 'Aspect ratio for all shots.', default: '16:9' },
-        visual_logic: { type: 'string', description: 'Visual logic type: None, Colour Pop, Side by Side, etc.' },
-        references: { type: 'array', items: { type: 'string' }, description: 'Paths to reference images.' },
+        theme_prompt: { type: 'string', description: 'Master prompt driving the whole grid (Unified Theme mode). Required if shot_prompts is not given.' },
+        shot_prompts: { type: 'array', items: { type: 'string' }, description: 'Per-shot prompts (Sequence mode) — up to 4, one per grid slot. Takes priority over theme_prompt if both are given.' },
+        engine: { type: 'string', description: 'Engine/model for the grid. Options: "Nano Banana 2", "Nano Banana Pro".', default: 'Nano Banana 2' },
+        ratio: { type: 'string', description: 'Aspect ratio for all shots. Options: "1:1", "16:9", "9:16", "4:3", "3:4".', default: '16:9' },
+        visual_logic: { type: 'string', description: 'Visual logic mode. Options: "Style from References", "Ultra Realistic", "Cinematic Movie", "Film Noir", "Anime / Manga". ("+ Custom Style" exists in the UI but is not wired up here.)', default: 'Style from References' },
+        references: { type: 'array', items: { type: 'string' }, description: 'Paths to reference images. NOT YET FUNCTIONAL — accepted but ignored, see tool description.' },
         project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
         project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
         campaign: { type: 'string', description: 'Campaign identifier for project matching (e.g., "ete-2026", "nouvelle-collection").' },
+        auto_confirm: { type: 'boolean', description: 'CREDITS. If false (default): configures the grid only, spends nothing. If true: clicks Generate (spends credits).', default: false },
       },
-      required: ['theme_prompt'],
-    },
-  },
-  {
-    name: 'flow_use_tool',
-    description: 'Open any tool by name in Google Flow and optionally fill its configuration parameters. UNVERIFIED: predates this session\'s live-testing work — test cautiously before relying on it. For image generation specifically, prefer flow_generate_image instead.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        tool_name: { type: 'string', description: 'Name of the tool to open (e.g. Grid Architect, Image Generation).' },
-        params: { type: 'object', description: 'Optional configuration parameters for the tool.' },
-        project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
-        project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
-        campaign: { type: 'string', description: 'Campaign identifier for project matching (e.g., "ete-2026", "nouvelle-collection").' },
-      },
-      required: ['tool_name'],
     },
   },
   {
@@ -241,6 +200,11 @@ const TOOL_DEFINITIONS = [
         name: { type: 'string', description: 'Custom name for the screenshot file.', default: 'manual' },
       },
     },
+  },
+  {
+    name: 'flow_queue_reset',
+    description: 'Force-clear a stuck job so the (single-slot) queue can accept new work again, without restarting the MCP server. Use when flow_queue_status shows hasActiveJob=true but the tool call that started it already returned or errored — a real bug elsewhere left the job neither completed nor failed. No-op if there is no active job.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flow_queue_status',
@@ -304,7 +268,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_edit_generation',
-    description: 'WARNING: spends credits. Follow-up (in-place) edit on an existing generation using the same composer as the edit page (e.g. "add a bee to this image") — this updates the image in place, it does not create a new gallery entry. If id/url is given, navigates there first; otherwise requires the browser to already be on a generation\'s edit page. Default (auto_confirm=false): fills the instruction only, no credits spent. With auto_confirm=true: clicks Create and returns the new media id(s).',
+    description: 'WARNING: spends credits. Follow-up (in-place) edit on an existing generation using the same composer as the edit page (e.g. "add a bee to this image", or "change the background to black, keep everything else identical") — this updates the image in place, it does not create a new gallery entry. THIS is the correct tool for a black/white background-swap pass or any other revision of a specific prior generation — flow_generate_image cannot do this, it always starts a blank generation with no reference to any existing image. If id/url is given, navigates there first; otherwise requires the browser to already be on a generation\'s edit page. Default (auto_confirm=false): fills the instruction only, no credits spent. With auto_confirm=true: clicks Create and returns the new media id(s). CAUTION: the edit composer has no ratio/settings control, so Flow can silently change the image\'s aspect ratio even on an "identical, just X" instruction — this tool auto-detects that (compares the hero image\'s pixel dimensions before/after) and retries once with an explicit ratio-lock clause appended; if it still drifts after the retry, the call throws (the edit was still applied and its media id is included in the error) rather than returning a silently wrong-shaped success.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -326,9 +290,14 @@ async function handleToolCall(name, args) {
 
   switch (name) {
     case 'flow_connect': {
+      const profileKey = args?.profile || getDefaultProfileKey();
+      const profileEntry = getProfileEntry(profileKey);
+      const sourceProfileUsed = args?.source_profile || profileEntry?.sourceProfile;
       const result = await launchKiaraProfile({
         headless: args?.headless || false,
         virtualDisplay: args?.virtual_display || false,
+        profile: profileKey,
+        sourceProfile: args?.source_profile,
       });
       if (result.browser) setBrowser(result.browser);
       const page = getPage();
@@ -342,19 +311,38 @@ async function handleToolCall(name, args) {
       const url = page.url();
       let accountCheck = null;
       try {
-        accountCheck = await checkAccount(page);
+        accountCheck = await checkAccount({ expectedAccount: profileEntry?.expectedAccount, enforceExpected: true });
       } catch (e) {
         accountCheck = { verified: false, error: e.message };
+      }
+      // Self-registration: config's `profiles` map is the single source of
+      // truth for every known account — write this profile into it once its
+      // real account email is discovered, so a re-seed or a fresh session
+      // never needs source_profile/expectedAccount supplied again by hand.
+      // Only writes on genuinely new info (new key, or a changed/newly-
+      // discovered email) — not on every connect.
+      if (accountCheck?.verified && accountCheck.account && accountCheck.account.includes('@')) {
+        const alreadyCorrect = profileEntry?.expectedAccount === accountCheck.account
+          && (!sourceProfileUsed || profileEntry?.sourceProfile === sourceProfileUsed);
+        if (!alreadyCorrect) {
+          const profiles = { ...getAllProfiles() };
+          profiles[profileKey] = {
+            ...(sourceProfileUsed ? { sourceProfile: sourceProfileUsed } : profileEntry?.sourceProfile ? { sourceProfile: profileEntry.sourceProfile } : {}),
+            expectedAccount: accountCheck.account,
+          };
+          updateConfig({ profiles });
+          logger.info('Self-registered profile in config', { profileKey, entry: profiles[profileKey] });
+        }
       }
       if (oauthRequired) {
         return { content: [{ type: 'text', text: JSON.stringify({
           status: 'oauth_required',
-          message: 'Google sign-in needed in the persistent profile (chrome-profile-kiara/) — this only ever '
-            + 'happens once, then every future flow_connect reuses the saved session automatically. This step '
-            + 'needs a VISIBLE window: if this call used virtual_display=true or headless=true, retry with '
-            + 'both false so a human can see and complete it, then future calls can go back to any mode. '
-            + 'Ask the user to: 1) look at the Chrome window, 2) pick their Google account (and complete 2FA '
-            + 'if prompted), 3) retry this tool once signed in.',
+          message: `Google sign-in needed in the persistent profile (chrome-profile-${profileKey}/) — this only ever `
+            + 'happens once per profile, then every future flow_connect with the same profile reuses the saved '
+            + 'session automatically. This step needs a VISIBLE window: if this call used virtual_display=true or '
+            + 'headless=true, retry with both false so a human can see and complete it, then future calls can go '
+            + 'back to any mode. Ask the user to: 1) look at the Chrome window, 2) pick their Google account (and '
+            + 'complete 2FA if prompted), 3) retry this tool once signed in.',
           account: accountCheck?.account || 'verified-account',
           url: page.url().substring(0, 100),
           accountVerified: accountCheck,
@@ -362,6 +350,7 @@ async function handleToolCall(name, args) {
       }
       return { content: [{ type: 'text', text: JSON.stringify({
         status: 'connected',
+        profile: profileKey,
         account: accountCheck?.account || 'verified-account',
         url: page.url(),
         accountVerified: accountCheck,
@@ -379,8 +368,10 @@ async function handleToolCall(name, args) {
     }
 
     case 'flow_account_check': {
-      const page = getPage();
-      const result = await checkAccount(page);
+      getPage(); // throws BROWSER_NOT_CONNECTED if nothing is connected — verifyAccount reads the page itself internally
+      const activeProfileKey = getActiveProfileKey();
+      const expectedAccount = activeProfileKey ? getProfileEntry(activeProfileKey)?.expectedAccount : null;
+      const result = await checkAccount({ expectedAccount, enforceExpected: true });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 
@@ -409,18 +400,8 @@ async function handleToolCall(name, args) {
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 
-    case 'flow_import_character': {
-      const result = await handleImportCharacter(args);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    }
-
     case 'flow_open_characters': {
       const result = await handleOpenCharacters(args);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    }
-
-    case 'flow_create_scene': {
-      const result = await handleCreateScene(args);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 
@@ -431,11 +412,6 @@ async function handleToolCall(name, args) {
 
     case 'flow_use_grid_architect': {
       const result = await handleUseGridArchitect(args);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    }
-
-    case 'flow_use_tool': {
-      const result = await handleUseFlowTool(args);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 
@@ -460,6 +436,14 @@ async function handleToolCall(name, args) {
       const page = getPage();
       const ss = await takeScreenshot(page, args?.name || 'manual');
       return { content: [{ type: 'text', text: JSON.stringify({ screenshot: ss, message: 'Screenshot saved.' }) }] };
+    }
+
+    case 'flow_queue_reset': {
+      const cleared = jobQueue.forceReset();
+      return { content: [{ type: 'text', text: JSON.stringify({
+        status: cleared ? 'cleared' : 'no_active_job',
+        clearedJob: cleared ? { id: cleared.id, type: cleared.type } : null,
+      }, null, 2) }] };
     }
 
     case 'flow_queue_status': {

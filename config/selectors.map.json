@@ -1,10 +1,10 @@
 {
   "_description": "UI selectors map for Google Flow. Discovered via flow_discover_ui. Update when Flow UI changes.",
-  "_lastUpdated": "2026-08-13T15:32:14.216Z",
+  "_lastUpdated": "2026-08-14T12:06:37.485Z",
   "main": {
     "url": "https://labs.google/fx/tools/flow",
     "title": "Google Flow - AI Creative Studio for Video, Images & Custom Tools",
-    "discoveredAt": "2026-08-13T15:32:14.216Z",
+    "discoveredAt": "2026-08-14T12:06:37.485Z",
     "selectors": {
       "buttons": [
         {
@@ -85,77 +85,7 @@
           "dataTestId": null
         },
         {
-          "text": "Try Omni now",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": null,
-          "dataTestId": null
-        },
-        {
-          "text": "Go to banner 1",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": "Go to banner 1",
-          "dataTestId": null
-        },
-        {
-          "text": "Go to banner 2",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": "Go to banner 2",
-          "dataTestId": null
-        },
-        {
-          "text": "Go to banner 3",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": "Go to banner 3",
-          "dataTestId": null
-        },
-        {
-          "text": "Go to banner 4",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": "Go to banner 4",
-          "dataTestId": null
-        },
-        {
-          "text": "Go to banner 5",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": "Go to banner 5",
-          "dataTestId": null
-        },
-        {
           "text": "close",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": null,
-          "dataTestId": null
-        },
-        {
-          "text": "editEdit project",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": null,
-          "dataTestId": null
-        },
-        {
-          "text": "deleteDelete project",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": null,
-          "dataTestId": null
-        },
-        {
-          "text": "editEdit project",
-          "visible": true,
-          "tag": "BUTTON",
-          "ariaLabel": null,
-          "dataTestId": null
-        },
-        {
-          "text": "deleteDelete project",
           "visible": true,
           "tag": "BUTTON",
           "ariaLabel": null,
@@ -218,21 +148,10 @@
         {
           "level": "H2",
           "text": "Tools from creators like you"
-        },
-        {
-          "level": "H2",
-          "text": "Introducing Gemini Omni Flash"
         }
       ],
-      "modelTexts": [
-        "Introducing Gemini Omni Flash",
-        "Try Omni now"
-      ],
-      "ratioTexts": [
-        "Aug 11, 04:19 PM",
-        "Aug 11, 04:17 PM",
-        "Aug 11, 02:11 PM"
-      ]
+      "modelTexts": [],
+      "ratioTexts": []
     }
   },
   "imageGeneration": {

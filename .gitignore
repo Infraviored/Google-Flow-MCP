@@ -2,7 +2,7 @@ node_modules/
 logs/
 screenshots-debug/
 outputs/
-chrome-profile-kiara/
+chrome-profile-*/
 screenshot*.png
 config/flow.config.json
 config/flow.projects.json

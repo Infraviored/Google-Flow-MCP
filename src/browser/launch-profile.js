@@ -1,61 +1,82 @@
-import { chromium } from 'playwright';
 import path from 'path';
-import fs from 'fs';
 import { logger } from '../utils/logger.js';
 import { get } from '../utils/config.js';
-import { FlowError, ErrorCodes } from '../utils/errors.js';
-import { launchChromeDirect, setPage, setContext, setConnected, setBrowser, isBrowserConnected, isHandleAliveAsync, resetConnection } from './connect.js';
+import { launchChromeDirect, getActiveProfileKey } from './connect.js';
 
 const CHROME_PATH = get('chromePath', '/opt/google/chrome/chrome');
 const CDP_PORT = get('cdpPort', 9222);
 const FLOW_URL = get('flowUrl', 'https://labs.google/fx/en/tools/flow');
-const CHROME_PROFILE = get('chromeProfile', 'Default');
 const CHROME_USER_DATA_DIR = get('chromeUserDataDir', path.resolve(process.env.HOME, '.config/google-chrome'));
 
-export async function launchKiaraProfile({ headless = false, virtualDisplay } = {}) {
-  if (isBrowserConnected()) {
-    const alive = await isHandleAliveAsync();
-    if (alive) {
-      logger.info('Browser already connected, reusing');
-      return { success: true, message: 'Already connected' };
-    }
-    logger.warn('Stale browser connection detected, clearing state before reconnecting');
-    resetConnection();
-  }
+// config's `profiles` map is the single source of truth for every known
+// account: { [profileKey]: { sourceProfile, expectedAccount } }. `profiles`
+// is read fresh (not cached at import time) so a self-registered entry
+// written mid-session (see index.js's flow_connect handler) is picked up
+// immediately, not just after a restart.
+export function getDefaultProfileKey() {
+  return get('defaultProfile', 'default');
+}
 
+export function getProfileEntry(profileKey) {
+  return get('profiles', {})[profileKey] || null;
+}
 
-  const profileSource = path.resolve(CHROME_USER_DATA_DIR, CHROME_PROFILE);
+export function getAllProfiles() {
+  return get('profiles', {});
+}
 
-  if (!fs.existsSync(profileSource)) {
-    throw new FlowError(ErrorCodes.CONFIG_ERROR,
-      `Chrome profile "${CHROME_PROFILE}" not found at ${profileSource}. Check chromeProfile/chromeUserDataDir in config/flow.config.json.`);
-  }
+// Convenience for any module that needs "the expected account for whichever
+// profile is currently connected" without re-deriving it — e.g. tool result
+// payloads reporting which account a generation ran under.
+export function getActiveExpectedAccount() {
+  const key = getActiveProfileKey();
+  if (!key) return null;
+  return getProfileEntry(key)?.expectedAccount || null;
+}
 
-  logger.info('Launching Chrome via direct+CDP method (anti-detection)', { profileSource });
+export function profileDirFor(profileKey) {
+  return path.resolve(import.meta.dirname, '../..', `chrome-profile-${profileKey}`);
+}
 
-  try {
-    // Try connecting to existing Chrome instance first
-    const existing = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-    logger.info('Found existing Chrome instance, reusing');
-    const ctx = existing.contexts()[0];
-    const pg = ctx?.pages()[0];
-    setBrowser(existing);
-    setContext(ctx);
-    setConnected(true);
-    if (pg) { setPage(pg); return { browser: existing, context: ctx, page: pg }; }
-    const newPage = await ctx.newPage();
-    setPage(newPage);
-    return { browser: existing, context: ctx, page: newPage };
-  } catch {
-    // Launch Chrome directly (not via Playwright) for anti-detection
-    return await launchChromeDirect({
-      chromePath: CHROME_PATH,
-      cdpPort: CDP_PORT,
-      headless,
-      profileSource,
-      virtualDisplay: virtualDisplay ?? get('virtualDisplay', false),
-    });
-  }
+// `profile` selects which persistent chrome-profile-{key}/ directory to use
+// — each is a fully independent Chrome profile/Google account. Key is just
+// a label (no requirement to be an email or match anything) — nothing
+// downstream depends on it beyond naming the directory; account identity
+// always comes from whichever Google account is actually signed in there.
+// Omitted defaults to config's `defaultProfile`.
+//
+// Seed source resolution order: explicit `sourceProfile` arg > config's
+// profiles[profileKey].sourceProfile (a profile connected before, with a
+// known seed) > nothing (starts completely empty — first connect lands on
+// Google's account chooser for a fresh interactive sign-in). `sourceProfile`
+// is a system Chrome profile DIRECTORY NAME under chromeUserDataDir (e.g.
+// "Default" or "Profile 3" — NOT an email address); when resolved, the new
+// persistent profile is seeded from that already-signed-in system profile,
+// carrying its session over with no interactive sign-in step at all.
+export async function launchKiaraProfile({ headless = false, virtualDisplay, profile, sourceProfile } = {}) {
+  const profileKey = profile || getDefaultProfileKey();
+  const persistentProfileDir = profileDirFor(profileKey);
+
+  const effectiveSourceProfile = sourceProfile || getProfileEntry(profileKey)?.sourceProfile;
+  const profileSource = effectiveSourceProfile ? path.resolve(CHROME_USER_DATA_DIR, effectiveSourceProfile) : undefined;
+
+  logger.info('Launching Chrome via direct+CDP method (anti-detection)', { profileKey, persistentProfileDir, profileSource });
+
+  // launchChromeDirect (connect.js) is the single source of truth for
+  // whether an already-alive browser can be reused — it compares display
+  // mode AND profile dir before deciding to reuse vs. relaunch. No
+  // duplicate reuse-shortcut here; a duplicate that didn't check profile
+  // identity was exactly how a profile switch used to silently keep
+  // reusing the wrong account's browser.
+  return await launchChromeDirect({
+    chromePath: CHROME_PATH,
+    cdpPort: CDP_PORT,
+    headless,
+    profileSource,
+    noSeed: !profileSource,
+    persistentProfileDir,
+    virtualDisplay: virtualDisplay ?? get('virtualDisplay', false),
+  });
 }
 
 // Flow's own client bundle intermittently throws "Cannot read properties of
