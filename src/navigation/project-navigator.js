@@ -10,7 +10,7 @@ import path from 'path';
 
 const PROJECTS_FILE = path.resolve(get('flowHome', '.'), 'config', 'flow.projects.json');
 
-function loadProjects() {
+export function loadProjects() {
   try {
     if (fs.existsSync(PROJECTS_FILE)) {
       return JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf-8'));
@@ -25,6 +25,16 @@ function saveProjects(data) {
   const dir = path.dirname(PROJECTS_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(PROJECTS_FILE, JSON.stringify(data, null, 2));
+}
+
+// The most-recently-used cached project, if any — lets flow_connect map straight
+// to a known project's URL instead of defaulting to the bare Flow landing page
+// (open_flow's old behavior when no explicit project_id was given, even though the
+// project in use is usually already known from a prior call this same session).
+export function getMostRecentProject() {
+  const { projects } = loadProjects();
+  if (!projects.length) return null;
+  return [...projects].sort((a, b) => new Date(b.last_used) - new Date(a.last_used))[0];
 }
 
 /**
@@ -355,6 +365,8 @@ export async function ensureProjectInContext(page, context = {}) {
       const store = loadProjects();
       const cached = store.projects.find(p => p.name && p.name.trim().toLowerCase() === wanted);
       if (cached && currentId === cached.id) {
+        cached.last_used = new Date().toISOString();
+        saveProjects(store);
         return { url: currentUrl, id: currentId, name: cached.name, reused: true };
       }
 

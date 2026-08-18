@@ -28,6 +28,7 @@ import { handleListGenerations } from './tools/list-generations.js';
 import { handleOpenGeneration } from './tools/open-generation.js';
 import { handleEditGeneration } from './tools/edit-generation.js';
 import { handleGenerationHistory } from './tools/generation-history.js';
+import { getMostRecentProject } from './navigation/project-navigator.js';
 import { jobQueue } from './queue/job-queue.js';
 import { takeScreenshot } from './utils/screenshots.js';
 import fs from 'fs';
@@ -322,7 +323,13 @@ async function handleToolCall(name, args) {
       const page = getPage();
       let oauthRequired = false;
       if (args?.open_flow !== false) {
-        const navResult = await navigateToFlow(page, undefined, args?.project_id);
+        // Default to the most recently used known project instead of the bare
+        // Flow landing page when the caller didn't ask for a specific project —
+        // the landing page is only the right target on a genuinely first-ever
+        // connect (no cached project yet); every later connect already knows
+        // where it's going, so it should go straight there.
+        const effectiveProjectId = args?.project_id || getMostRecentProject()?.id;
+        const navResult = await navigateToFlow(page, undefined, effectiveProjectId);
         if (navResult && navResult.authenticated === false) {
           oauthRequired = true;
         }
