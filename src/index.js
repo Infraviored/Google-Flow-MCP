@@ -91,6 +91,7 @@ const TOOL_DEFINITIONS = [
         model: { type: 'string', description: 'Model to use: Nano Banana Pro, Nano Banana 2, or Nano Banana 2 Lite.', default: 'Nano Banana 2' },
         auto_confirm: { type: 'boolean', description: 'CREDITS. If false (default): prepares only, spends nothing. If true: verifies Image mode is active, THEN clicks Generate (spends credits).', default: false },
         ratio: { type: 'string', description: 'Aspect ratio: 1:1, 16:9, 9:16, 4:3, 3:4.', default: '1:1' },
+        quantity: { type: 'number', description: 'Number of image variants to generate in this single call (1-4, clamped). Set via the same settings menu as ratio/model, all from ONE credit-billed generation batch — cheaper and more consistent than calling this tool multiple times for multiple variants.', default: 1 },
         reference_images: { type: 'array', items: { type: 'string' }, description: 'Paths to reference images (optional).' },
         brand: { type: 'string', description: 'Brand context for automatic model selection: premium, standard.' },
         project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
