@@ -3,7 +3,7 @@ import { getPage } from '../browser/connect.js';
 import { jobQueue } from '../queue/job-queue.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { takeScreenshot } from '../utils/screenshots.js';
-import { prepareDownload, saveMetadata } from '../utils/file-manager.js';
+import { prepareDownload, saveMetadata, resolveTextParam } from '../utils/file-manager.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { get } from '../utils/config.js';
 import { getActiveExpectedAccount } from '../browser/launch-profile.js';
@@ -44,6 +44,8 @@ function selectRatio(requested) {
 let lastAppliedImageSettings = null;
 
 export async function handleGenerateImage(args) {
+  args.prompt = resolveTextParam(args.prompt, args.prompt_file, { paramName: 'prompt', fileParamName: 'prompt_file' });
+
   const autoConfirm = args.auto_confirm === true;
   const job = jobQueue.createJob('image_generation', {
     prompt: args.prompt,

@@ -5,11 +5,10 @@ import { getPromptInput, fillPrompt } from '../browser/composer.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { get } from '../utils/config.js';
+import { resolveTextParam } from '../utils/file-manager.js';
 
 export async function handleEditGeneration(args = {}) {
-  if (!args.instruction) {
-    throw new FlowError(ErrorCodes.INVALID_PARAMS, 'flow_edit_generation requires an instruction.');
-  }
+  args.instruction = resolveTextParam(args.instruction, args.instruction_file, { paramName: 'instruction', fileParamName: 'instruction_file' });
 
   const page = getPage();
 

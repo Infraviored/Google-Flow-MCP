@@ -87,7 +87,8 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        prompt: { type: 'string', description: 'The text prompt for image generation. HARD LIMIT: 1400 characters (Flow-enforced) — the tool throws before typing if exceeded; shorten and retry rather than trimming blind.' },
+        prompt: { type: 'string', description: 'The text prompt for image generation, inline. HARD LIMIT: 1400 characters (Flow-enforced) — the tool throws before typing if exceeded; shorten and retry rather than trimming blind. Either this or prompt_file is required. Prefer prompt_file for a prompt you\'re iterating on (trimming toward the limit, rewording) — editing a file with a diff-based Edit tool is far cheaper than retyping the full text into this param every retry.' },
+        prompt_file: { type: 'string', description: 'Path to a text file containing the prompt, as an alternative to passing it inline via prompt. Read fresh on every call, so editing the file (e.g. with the Edit tool) and calling again picks up the change without repeating the text in the tool call itself.' },
         model: { type: 'string', description: 'Model to use: Nano Banana Pro, Nano Banana 2, or Nano Banana 2 Lite.', default: 'Nano Banana 2' },
         auto_confirm: { type: 'boolean', description: 'CREDITS. If false (default): prepares only, spends nothing. If true: verifies Image mode is active, THEN clicks Generate (spends credits).', default: false },
         ratio: { type: 'string', description: 'Aspect ratio: 1:1, 16:9, 9:16, 4:3, 3:4.', default: '1:1' },
@@ -98,7 +99,6 @@ const TOOL_DEFINITIONS = [
         project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
         campaign: { type: 'string', description: 'Campaign identifier for project matching (e.g., "ete-2026", "nouvelle-collection").' },
       },
-      required: ['prompt'],
     },
   },
   {
@@ -279,7 +279,8 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: 'object',
       properties: {
-        instruction: { type: 'string', description: 'The change to make, e.g. "make the sky more dramatic".' },
+        instruction: { type: 'string', description: 'The change to make, inline, e.g. "make the sky more dramatic". Either this or instruction_file is required. Prefer instruction_file for anything long or getting iterated on (trimmed toward the 1400-char limit, reworded) — editing a file with a diff-based Edit tool is far cheaper than retyping the full text into this param every retry.' },
+        instruction_file: { type: 'string', description: 'Path to a text file containing the instruction, as an alternative to passing it inline via instruction. Read fresh on every call.' },
         id: { type: 'string', description: 'Generation id to edit. Optional if already on that generation\'s edit page.' },
         url: { type: 'string', description: 'Full or relative edit URL to edit. Optional if already on that generation\'s edit page.' },
         auto_confirm: { type: 'boolean', description: 'CREDITS. If false (default): fills instruction only. If true: clicks Create (spends credits).', default: false },
@@ -287,7 +288,6 @@ const TOOL_DEFINITIONS = [
         project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
         campaign: { type: 'string', description: 'Campaign identifier for project matching.' },
       },
-      required: ['instruction'],
     },
   },
   {

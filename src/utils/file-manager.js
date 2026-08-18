@@ -2,6 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { getFlowHome } from './config.js';
 import { logger } from './logger.js';
+import { FlowError, ErrorCodes } from './errors.js';
 
 const OUTPUT_BASE = path.join(getFlowHome(), 'outputs');
 
@@ -19,6 +20,26 @@ function generateFilename(type, model, jobId, index) {
   const ext = type === 'image' ? 'png' : 'mp4';
   const idx = String(index || 1).padStart(3, '0');
   return `flow_${dateStr}_${timeStr}_${modelSlug}_${type}_${jobId}_${idx}.${ext}`;
+}
+
+// Long prompts/instructions (routinely near Flow's 1400-char limit) get iterated on —
+// trimmed, reworded, re-tried — far more cheaply as a real file edited with a diff-based
+// Edit tool than by retyping the full text into every tool call. Lets callers pass a path
+// instead of the text itself; the caller decides which one it has, this just resolves it
+// to the actual string every downstream caller actually needs.
+export function resolveTextParam(inlineValue, filePath, { paramName, fileParamName }) {
+  if (inlineValue) return inlineValue;
+  if (filePath) {
+    if (!fs.existsSync(filePath)) {
+      throw new FlowError(ErrorCodes.INVALID_PARAMS, `${fileParamName} "${filePath}" does not exist.`);
+    }
+    const text = fs.readFileSync(filePath, 'utf-8').trim();
+    if (!text) {
+      throw new FlowError(ErrorCodes.INVALID_PARAMS, `${fileParamName} "${filePath}" is empty.`);
+    }
+    return text;
+  }
+  throw new FlowError(ErrorCodes.INVALID_PARAMS, `Requires either ${paramName} or ${fileParamName}.`);
 }
 
 export function getOutputDir(type) {
