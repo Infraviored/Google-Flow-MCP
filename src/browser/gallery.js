@@ -160,6 +160,25 @@ export async function listGenerations(page, { limit = 20 } = {}) {
   return results.slice(0, limit);
 }
 
+// waitForNewMedia's "new" signal is just "wasn't in the img-src baseline snapshot" —
+// unsound against Flow's virtualized gallery grid, where tiles scrolled out of view
+// simply aren't mounted at all. Confirmed live: a generation call returned editIds for
+// 3 real, legitimate, but OLD gallery entries (one positively identified by its exact
+// prompt text) instead of the tile it had actually just created — the old tiles weren't
+// in the baseline because they weren't rendered yet, then mounted (e.g. from a reflow)
+// and got misread as "new". Since the grid is newest-first, a genuinely new id must
+// appear within the leading `checkLimit` entries of a fresh listGenerations() scan;
+// anything that doesn't is untrustworthy and must not be silently returned as if it
+// were the caller's own result.
+export async function verifyNewestTileIds(page, editIds, { checkLimit } = {}) {
+  const limit = checkLimit || Math.max(editIds.length + 5, 10);
+  const recent = await listGenerations(page, { limit });
+  const recentIds = new Set(recent.map(r => r.id));
+  const verifiedIds = editIds.filter(id => recentIds.has(id));
+  const unverifiedIds = editIds.filter(id => !recentIds.has(id));
+  return { verifiedIds, unverifiedIds, allVerified: unverifiedIds.length === 0 };
+}
+
 // Navigate to a specific generation's /edit/{id} page. Prefers clicking the
 // matching gallery tile link (real SPA nav) if it's present in the current
 // DOM; falls back to a hard page.goto for an id/url not currently rendered
@@ -219,6 +238,28 @@ async function getMainPreviewImageSize(page) {
   }).catch(() => null);
 }
 
+// Same virtualized/mount-order risk as verifyNewestTileIds, but for the edit page's
+// version-history side panel instead of the main gallery grid: its small thumbnail
+// <img>s can mount/reflow independently of an actual new edit, so waitForNewMedia's
+// baseline-diff can misattribute an OLD sibling version as the result of THIS edit.
+// The one thing that can't lie about "what did this edit actually produce" is the main
+// (largest-rendered) preview image's own current src — read its media id directly.
+async function getMainPreviewMediaId(page) {
+  return await page.evaluate(() => {
+    const imgs = Array.from(document.querySelectorAll('img'));
+    let best = null;
+    let bestWidth = 0;
+    for (const img of imgs) {
+      const match = (img.src || '').match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
+      if (match && img.width > 100 && img.width > bestWidth) {
+        best = match[1];
+        bestWidth = img.width;
+      }
+    }
+    return best;
+  }).catch(() => null);
+}
+
 async function clickCreateAndWait(page, instruction, timeoutMs) {
   const promptInput = await getPromptInput(page);
   if (!promptInput) {
@@ -241,6 +282,17 @@ async function clickCreateAndWait(page, instruction, timeoutMs) {
     throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
       'Follow-up edit completed but no new media was detected in the DOM.');
   }
+
+  // Cross-check against the one thing that can't lie about what this edit produced:
+  // the main preview's own current src. See getMainPreviewMediaId for why baseline-
+  // diffing alone (waitForNewMedia) isn't trustworthy on this page.
+  const mainPreviewId = await getMainPreviewMediaId(page);
+  if (mainPreviewId && !newIds.includes(mainPreviewId)) {
+    logger.warn('Follow-up edit: main preview media id does not match any waitForNewMedia result — ' +
+      'likely a stale sibling thumbnail misattributed as the edit result', { newIds, mainPreviewId });
+    return [mainPreviewId];
+  }
+
   return newIds;
 }
 

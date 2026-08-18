@@ -9,7 +9,7 @@ import { get } from '../utils/config.js';
 import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
-import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds } from '../browser/gallery.js';
+import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds, verifyNewestTileIds } from '../browser/gallery.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -290,6 +290,36 @@ export async function handleGenerateImage(args) {
         'Check the Flow project content library.');
     }
 
+    // Confirmed live: the same ratio param, same model, same project can silently come
+    // out at the wrong aspect ratio on one call and not another — the API response even
+    // echoes back the REQUESTED ratio regardless of what actually rendered, so trusting
+    // it is not an option. Check the actual rendered pixel dimensions instead (same
+    // signal followUpEdit's ratio-drift retry already relies on for the edit path).
+    const actualDims = await page.evaluate((uuids) => {
+      const out = {};
+      const imgs = Array.from(document.querySelectorAll('img'));
+      for (const uuid of uuids) {
+        const img = imgs.find(i => (i.src || '').includes(`name=${uuid}`) && i.naturalWidth > 0);
+        if (img) out[uuid] = { width: img.naturalWidth, height: img.naturalHeight };
+      }
+      return out;
+    }, generatedImageUuids).catch(() => ({}));
+
+    const [reqW, reqH] = ratio.split(':').map(Number);
+    const requestedAspect = reqW && reqH ? reqW / reqH : null;
+    const ratioMismatches = [];
+    if (requestedAspect) {
+      for (const [uuid, dims] of Object.entries(actualDims)) {
+        const actualAspect = dims.width / dims.height;
+        if (Math.abs(actualAspect - requestedAspect) / requestedAspect > 0.03) {
+          ratioMismatches.push({ uuid, requested: ratio, actual: `${dims.width}x${dims.height}` });
+        }
+      }
+    }
+    if (ratioMismatches.length > 0) {
+      logger.warn('Generated image(s) do not match the requested aspect ratio', { ratioMismatches });
+    }
+
     // STEP 13: Download generated images via authenticated session (using APIRequestContext to avoid page navigation)
     // Note: 2K/4K upscaled downloads require UI interaction and reCAPTCHA, out of scope for direct API.
     logger.info('Downloading generated images', { count: generatedImageUuids.length });
@@ -332,6 +362,32 @@ export async function handleGenerateImage(args) {
     const projectIdForUrls = page.url().split('/project/')[1]?.split(/[/?#]/)[0];
     const editUrls = editIds.map(id => `https://labs.google/fx/en/tools/flow/project/${projectIdForUrls}/edit/${id}`);
 
+    // Confirmed live: waitForNewMedia's "wasn't in the baseline" signal can misfire
+    // against the virtualized gallery grid, returning real editIds for OLD, unrelated
+    // generations instead of the tile this call actually created — see gallery.js's
+    // verifyNewestTileIds for the mechanism. If NONE of the returned editIds trace back
+    // to the newest gallery entries, this result is a known failure mode, not a
+    // borderline case — fail loud instead of shipping wrong files under the right prompt.
+    let idVerification = null;
+    if (editIds.length > 0) {
+      idVerification = await verifyNewestTileIds(page, editIds).catch(() => null);
+      if (idVerification && !idVerification.allVerified && idVerification.verifiedIds.length === 0) {
+        await takeScreenshot(page, 'editid-mismatch');
+        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
+          'Generation returned editIds that do not correspond to any of the newest gallery entries — ' +
+          'the downloaded files are very likely OLD, unrelated generations misattributed to this call, ' +
+          'not the images this prompt just produced. Do not trust or use downloadedFiles/editIds from ' +
+          'this result. Retry the call, or use flow_list_generations to find the real newest entry.',
+          { requestedPrompt: args.prompt, unverifiedEditIds: idVerification.unverifiedIds, downloadedFiles });
+      }
+      if (idVerification && !idVerification.allVerified) {
+        logger.warn('Some returned editIds did not verify against the newest gallery entries', {
+          verifiedIds: idVerification.verifiedIds,
+          unverifiedIds: idVerification.unverifiedIds,
+        });
+      }
+    }
+
     saveMetadata(job.id, {
       type: 'image',
       model,
@@ -358,6 +414,12 @@ export async function handleGenerateImage(args) {
       editIds,
       editUrls,
       credits_consumed: true,
+      ...(ratioMismatches.length > 0 && {
+        ratio_warning: `${ratioMismatches.length} of ${generatedImageUuids.length} generated image(s) did not ` +
+          `come out at the requested ratio (${ratio}) — Flow silently rendered a different aspect ratio. ` +
+          `See ratioMismatches for actual dimensions per image.`,
+        ratioMismatches,
+      }),
       hint: 'Report the files paths (1K, auto-saved here) to the user, then ask if they want any opened now with ' +
         'their OS default image viewer — do not open without asking. For 2K/4K, call flow_download_latest.',
     });
