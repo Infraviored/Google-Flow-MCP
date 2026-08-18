@@ -3,7 +3,7 @@ import { logger } from '../utils/logger.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { resolveDownloadPath } from '../utils/file-manager.js';
-import { navigateToGeneration, listGenerations } from '../browser/gallery.js';
+import { navigateToGeneration, listGenerations, getGenerationTitle } from '../browser/gallery.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -14,6 +14,15 @@ import os from 'os';
 // Linux, `open` on macOS).
 const REPORT_AND_OFFER_TO_OPEN_HINT =
   'Report this exact filePath to the user, then ask if they want it opened now with their OS default image viewer — do not open it without asking.';
+
+// Build a filename base from the generation's own on-page title plus a short id
+// suffix (still unique across re-downloads/edits of the same title) — sanitized
+// to filesystem-safe characters. Returns null if there's no usable title, so
+// callers fall back to their existing opaque-id naming.
+function titleToFilenameBase(title, shortId) {
+  const cleaned = (title || '').trim().replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+  return cleaned ? `${cleaned}_${shortId}` : null;
+}
 
 export async function handleDownloadLatest(args = {}) {
   const page = getPage();
@@ -112,9 +121,12 @@ export async function handleDownloadLatest(args = {}) {
         throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, 'Timed out waiting for the 2K upscaled download to complete');
       }
 
+      const editRouteId2k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || 'download';
+      const title2k = args.filename ? null : await getGenerationTitle(page);
+      const titledName2k = title2k ? `${titleToFilenameBase(title2k, editRouteId2k.slice(0, 8))}${path.extname(completed.filePath)}` : null;
       const { fullPath } = resolveDownloadPath('image', {
         filename: args.filename,
-        suggestedFilename: path.basename(completed.filePath),
+        suggestedFilename: titledName2k || path.basename(completed.filePath),
         model: 'download-2k',
         jobId: `upscaled_2k_${Date.now()}`,
       });
@@ -146,8 +158,10 @@ export async function handleDownloadLatest(args = {}) {
     // fetchable media id — confirmed live these are different id namespaces
     // even on the exact same tile/page. Fetching media.getMediaUrlRedirect
     // with the edit-route id silently fails. Always resolve the media id from
-    // the actual <img> on the page, never from the URL.
-    const mediaId = await page.evaluate(() => {
+    // the actual <img> on the page, never from the URL — unless the caller
+    // gave one explicitly (recovering a specific superseded history step;
+    // confirmed live this endpoint still resolves those, see flow_generation_history).
+    const mediaId = args.media_id || await page.evaluate(() => {
       const imgs = Array.from(document.querySelectorAll('img'));
       for (const img of imgs) {
         const src = img.src || '';
@@ -167,9 +181,11 @@ export async function handleDownloadLatest(args = {}) {
         const buffer = await response.body();
         const contentType = response.headers()['content-type'] || '';
         const ext = contentType === 'image/png' ? 'png' : 'jpg';
+        const title1k = args.filename ? null : await getGenerationTitle(page);
+        const titledName1k = title1k ? `${titleToFilenameBase(title1k, mediaId.substring(0, 8))}.${ext}` : null;
         const { fullPath } = resolveDownloadPath('image', {
           filename: args.filename,
-          suggestedFilename: `latest_${mediaId.substring(0, 8)}.${ext}`,
+          suggestedFilename: titledName1k || `latest_${mediaId.substring(0, 8)}.${ext}`,
           model: 'download',
           jobId: `latest_${mediaId.substring(0, 8)}`,
         });

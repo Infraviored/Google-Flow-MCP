@@ -104,6 +104,49 @@ export async function getVisibleMediaIds(page) {
   });
 }
 
+// The edit page's title bar has an editable text input holding the generation's
+// human-readable name (e.g. "Document writing via voice orb") — confirmed live via
+// the rendered DOM. Used to name downloaded files after what they actually are,
+// instead of an opaque uuid, so a wrong-file mixup (see verifyNewestTileIds) is
+// visible at a glance in the filename itself rather than only discoverable by
+// opening the file. Only meaningful on an /edit/ page; returns null elsewhere.
+export async function getGenerationTitle(page) {
+  return page.evaluate(() => {
+    const input = document.querySelector('input[aria-label="Editable text"]');
+    return input ? input.value.trim() : null;
+  }).catch(() => null);
+}
+
+// The edit page's "history" side panel (open by default, toggled by the
+// "Hide history"/"Show history" button) lists every step of this generation's
+// edit chain: each step's own thumbnail <img src="...name={mediaId}"> (its own
+// individually fetchable media id, confirmed live still resolvable via
+// media.getMediaUrlRedirect even after later edits superseded it — this is the
+// real recovery path for the "flow_edit_generation destroys the pre-edit
+// version" problem, not just a naming convenience) and the exact prompt/
+// instruction text that produced it, next to a `button.reuse-prompt-button`
+// (a stable, non-hashed class — unlike everything else in this file, safe to
+// select directly). No screenshot needed to read any of this.
+export async function listHistorySteps(page) {
+  return page.evaluate(() => {
+    const steps = Array.from(document.querySelectorAll('[id^="history-step-"]'));
+    return steps.map((step, index) => {
+      const idMatch = step.id.match(/^history-step-fe_id_(.+)$/);
+      const img = step.querySelector('img[src*="getMediaUrlRedirect"]');
+      const mediaMatch = img && (img.src || '').match(/name=([a-f0-9-]+)/);
+      const reuseBtn = step.querySelector('.reuse-prompt-button');
+      const promptContainer = reuseBtn ? reuseBtn.closest('div')?.parentElement : null;
+      const promptText = promptContainer?.firstElementChild?.textContent?.trim() || null;
+      return {
+        index,
+        tileId: idMatch ? idMatch[1] : null,
+        mediaId: mediaMatch ? mediaMatch[1] : null,
+        prompt: promptText,
+      };
+    });
+  }).catch(() => []);
+}
+
 // Gallery grid tiles: [data-tile-id="fe_id_..."] wrapping an
 // <a href=".../edit/{id}">. Newest-first. The id is ALWAYS taken from the
 // <a href>, never from data-tile-id or the <img src> — confirmed live that

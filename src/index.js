@@ -27,6 +27,7 @@ import { handleChangeSettings } from './tools/change-settings.js';
 import { handleListGenerations } from './tools/list-generations.js';
 import { handleOpenGeneration } from './tools/open-generation.js';
 import { handleEditGeneration } from './tools/edit-generation.js';
+import { handleGenerationHistory } from './tools/generation-history.js';
 import { jobQueue } from './queue/job-queue.js';
 import { takeScreenshot } from './utils/screenshots.js';
 import fs from 'fs';
@@ -130,6 +131,10 @@ const TOOL_DEFINITIONS = [
         id: {
           type: 'string',
           description: 'Optional generation id (edit-route id, not the img-src id) to download instead of whatever is currently on screen.',
+        },
+        media_id: {
+          type: 'string',
+          description: '1K only. Fetch this specific media id directly via the API instead of whatever is rendered on screen — the recovery path for an older step in a generation\'s edit history (get the id from flow_generation_history\'s steps[].mediaId). Confirmed live: still resolvable even after a later edit superseded it in the main preview. Ignored for 2K (that path requires the UI upscale flow on that exact id\'s own /edit/ page, which is not guaranteed to still exist for a superseded step).',
         },
         filename: {
           type: 'string',
@@ -268,7 +273,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'flow_edit_generation',
-    description: 'WARNING: spends credits. Follow-up (in-place) edit on an existing generation using the same composer as the edit page (e.g. "add a bee to this image", or "change the background to black, keep everything else identical") — this updates the image in place, it does not create a new gallery entry. THIS is the correct tool for a black/white background-swap pass or any other revision of a specific prior generation — flow_generate_image cannot do this, it always starts a blank generation with no reference to any existing image. WARNING — DESTRUCTIVE, confirmed live: once this edit fires, the PRE-EDIT version of the image is gone from this MCP\'s reach — flow_download_latest with the original id afterward silently returns the NEW (post-edit) file, not an error, and there is no way to recover the pre-edit version at 2K/4K after the fact (only whatever flow_generate_image auto-saved at 1K before this call, if anything). If you need the pre-edit version at a higher resolution, call flow_download_latest on it BEFORE calling this tool, never after. If id/url is given, navigates there first; otherwise requires the browser to already be on a generation\'s edit page. Default (auto_confirm=false): fills the instruction only, no credits spent. With auto_confirm=true: clicks Create and returns the new media id(s). CAUTION: the edit composer has no ratio/settings control, so Flow can silently change the image\'s aspect ratio even on an "identical, just X" instruction — this tool auto-detects that (compares the hero image\'s pixel dimensions before/after) and retries once with an explicit ratio-lock clause appended; if it still drifts after the retry, the call throws (the edit was still applied and its media id is included in the error) rather than returning a silently wrong-shaped success.',
+    description: 'WARNING: spends credits. Follow-up (in-place) edit on an existing generation using the same composer as the edit page (e.g. "add a bee to this image", or "change the background to black, keep everything else identical") — this updates the image in place, it does not create a new gallery entry. THIS is the correct tool for a black/white background-swap pass or any other revision of a specific prior generation — flow_generate_image cannot do this, it always starts a blank generation with no reference to any existing image. CAUTION — once this edit fires, flow_download_latest with the original edit-route id afterward silently returns the NEW (post-edit) file, not an error — the edit-route id always tracks the CURRENT version, not the one you called it for. The pre-edit version is NOT lost, though: call flow_generation_history (on this same generation) afterward to get its own individually fetchable media id from the step list, then flow_download_latest with that media_id — confirmed live this recovers it at 1K even after later edits. Only 2K/4K of a superseded step is not recoverable this way (that needs the UI upscale flow on that step\'s own /edit/ page, not guaranteed to still exist) — download at 2K BEFORE editing if you\'ll need that resolution. If id/url is given, navigates there first; otherwise requires the browser to already be on a generation\'s edit page. Default (auto_confirm=false): fills the instruction only, no credits spent. With auto_confirm=true: clicks Create and returns the new media id(s). CAUTION: the edit composer has no ratio/settings control, so Flow can silently change the image\'s aspect ratio even on an "identical, just X" instruction — this tool auto-detects that (compares the hero image\'s pixel dimensions before/after) and retries once with an explicit ratio-lock clause appended; if it still drifts after the retry, the call throws (the edit was still applied and its media id is included in the error) rather than returning a silently wrong-shaped success.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -281,6 +286,20 @@ const TOOL_DEFINITIONS = [
         campaign: { type: 'string', description: 'Campaign identifier for project matching.' },
       },
       required: ['instruction'],
+    },
+  },
+  {
+    name: 'flow_generation_history',
+    description: 'Read a generation\'s full edit-chain history as structured data, straight from the edit page\'s "history" side panel — no screenshot needed. Returns every step in order: its own individually fetchable media id (confirmed live still resolvable via flow_download_latest\'s 1K path even after later edits superseded it — the real recovery path for a follow-up edit that overwrote an earlier version, see flow_edit_generation\'s warning) and the exact prompt/instruction text that produced that step. If id/url is given, navigates there first; otherwise reads whatever generation the browser is already on the /edit/ page of.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Generation id (edit-route id) to read history for. Optional if already on that generation\'s edit page.' },
+        url: { type: 'string', description: 'Full or relative edit URL to read history for. Optional if already on that generation\'s edit page.' },
+        project_id: { type: 'string', description: 'Exact project id to work in (from flow_list_projects). Takes priority over project_name; errors if it does not exist.' },
+        project_name: { type: 'string', description: 'Project name to select. Matched against existing projects in the workspace; created under this name if no match.' },
+        campaign: { type: 'string', description: 'Campaign identifier for project matching.' },
+      },
     },
   },
 ];
@@ -472,6 +491,11 @@ async function handleToolCall(name, args) {
 
     case 'flow_edit_generation': {
       const result = await handleEditGeneration(args);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_generation_history': {
+      const result = await handleGenerationHistory(args);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 
