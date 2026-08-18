@@ -274,10 +274,13 @@ export async function createNewProject(page, name) {
     }
   }
 
-  // Store in local registry
+  // Store in local registry, keyed by the REAL Flow project id parsed from the URL —
+  // not a locally-invented one, so it lines up with the id every other lookup in this
+  // file uses (parsed from the URL the same way, or scraped live by listExistingProjects).
   const store = loadProjects();
+  const realId = finalUrl.split('/project/')[1]?.split(/[/?#]/)[0] || `proj_${Date.now()}`;
   const entry = {
-    id: `proj_${Date.now()}`,
+    id: realId,
     url: finalUrl,
     name: name || `Project ${new Date().toISOString().slice(0, 10)}`,
     created_at: new Date().toISOString(),
@@ -323,18 +326,44 @@ export async function ensureProjectInContext(page, context = {}) {
       }
       const live = await listExistingProjects(page);
       const match = live.find(p => p.id === context.project_id);
-      if (match) return await enterProject(match);
+      if (match) {
+        const store = loadProjects();
+        store.projects = store.projects.filter(p => p.id !== match.id);
+        store.projects.push({ id: match.id, name: match.name, url: match.url, last_used: new Date().toISOString() });
+        saveProjects(store);
+        return await enterProject(match);
+      }
       throw new FlowError(ErrorCodes.CONFIG_ERROR,
         `Project id "${context.project_id}" not found in the workspace. ` +
         `Available: ${live.map(p => `${p.name} (${p.id})`).join(', ') || 'none'}`);
     }
 
-    // Match a requested name against the LIVE workspace, not just local history.
+    // Match a requested name against the LIVE workspace, not just local history —
+    // but only pay for that live scan when we actually need to. listExistingProjects()
+    // unconditionally bounces to the bare Flow landing page first whenever the browser
+    // is currently inside ANY project (see its own currentUrl.includes('/project/')
+    // check) — which is every single time this branch used to run, since callers are
+    // normally already inside a project when they ask to "ensure" one. That bounce is
+    // slow (a scroll-and-scan loop) and fragile: anything that races or throws mid-bounce
+    // strands the browser on the landing page, where unrelated DOM (cookie banners,
+    // promo dialogs) can confuse completely unrelated logic (e.g. the Agent-chat
+    // sidebar's close-button detection) that assumes it's still inside a project.
+    // Fast path: if we're already sitting in the project this name last resolved to
+    // (cached below), skip the live scan and the bounce entirely.
     if (context.name) {
-      const live = await listExistingProjects(page);
       const wanted = context.name.trim().toLowerCase();
+      const store = loadProjects();
+      const cached = store.projects.find(p => p.name && p.name.trim().toLowerCase() === wanted);
+      if (cached && currentId === cached.id) {
+        return { url: currentUrl, id: currentId, name: cached.name, reused: true };
+      }
+
+      const live = await listExistingProjects(page);
       const match = live.find(p => p.name.trim().toLowerCase() === wanted);
       if (match) {
+        store.projects = store.projects.filter(p => p.id !== match.id);
+        store.projects.push({ id: match.id, name: match.name, url: match.url, last_used: new Date().toISOString() });
+        saveProjects(store);
         if (currentId === match.id) return { url: currentUrl, id: currentId, name: match.name, reused: true };
         return await enterProject(match);
       }

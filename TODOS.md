@@ -44,6 +44,51 @@ Schema says `model: Nano Banana Pro, Nano Banana 2, or Imagen 4`. The real Image
 dropdown offers `Nano Banana Pro / Nano Banana 2 / Nano Banana 2 Lite` — no Imagen 4, and
 Lite is missing from the schema. Fix the enum.
 
+## `flow_edit_generation` destroys the pre-edit version — no way to get it back at 2K
+
+Ran `flow_generate_image` (white bg) then `flow_edit_generation` (black bg, in place) on
+the same generation id. After the edit, `flow_download_latest` with the ORIGINAL editId
+silently returned the black (post-edit) file — not an error, just the wrong image, same
+byte-identical file as downloading with no id at all. Confirmed by md5sum. Trying the raw
+imageUuid instead threw: "Flow redirected back to https://.../project/{id} — edit view did
+not load" — the white version's edit page is genuinely gone, not just hard to address.
+
+Net effect: once you edit-in-place, the pre-edit state is unrecoverable through this MCP.
+The only surviving copy is whatever `flow_generate_image` auto-saved at 1K before the edit
+ran — there is no way to get the pre-edit version at 2K/4K after the fact.
+
+Workaround until fixed: always `flow_download_latest` (2K) the white/original result
+immediately after `flow_generate_image`, BEFORE calling `flow_edit_generation` on it.
+Doing the edit first and downloading both after (the natural order) loses the original.
+
+Real fix needed in the MCP: either `flow_edit_generation` should preserve/version the
+pre-edit generation so it stays downloadable by its own id, or the tool should warn loudly
+that this is destructive before it fires.
+
+## FIXED: "Agent-chat sidebar did not close" error bounces out of the project
+
+Root cause found live (2026-08-18), and it wasn't the sidebar-close logic at all — that
+was a downstream symptom. `ensureProjectInContext`'s `project_name` branch
+(`src/navigation/project-navigator.js`) unconditionally called `listExistingProjects(page)`
+on EVERY call, and `listExistingProjects` itself unconditionally navigates to the bare
+Flow landing page first whenever the browser is currently inside any project
+(`currentUrl.includes('/project/')` — true essentially every time this runs, since callers
+are normally already inside a project when "ensuring" one). So every single tool call
+passing `project_name` (which is most of them, all session) did a full bounce to the
+landing page and back — slow, and if anything raced or threw mid-bounce, the browser was
+left stranded on the landing page. Whatever DOM logic ran next (e.g. `closeSidebar`'s
+page-wide "Close"-text button search) then operated on the wrong page entirely, which is
+what produced the confusing "sidebar did not close" error — the sidebar wasn't even the
+real problem.
+
+Fix applied: the `project_name` branch now checks the local `flow.projects.json` cache
+first — if the browser is already sitting in the project a matching cached name last
+resolved to, it returns immediately with zero navigation. The `project_id` branch and the
+live-scan fallback now persist their resolution into that cache too, so the fast path
+actually has data after the first real lookup. Needs an MCP restart to load; not yet
+re-verified through a full generate/edit call live (the live-DOM investigation that found
+this used raw scripts against the shared browser, not the MCP tools themselves).
+
 ## MCP-launched Chrome process died mid-session, no recovery
 
 `flow_screenshot` and `flow_account_check` both failed with `page.$: Target page, context or
