@@ -3,8 +3,10 @@ import { logger } from '../utils/logger.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { resolveDownloadPath } from '../utils/file-manager.js';
-import { navigateToGeneration, listGenerations, getGenerationTitle, getMainPreviewMediaId, readUpscaleToast } from '../browser/gallery.js';
-import { recordGeneration, recordDownload } from '../utils/media-index.js';
+import { navigateToGeneration, listGenerations, getMainPreviewMediaId, readUpscaleToast } from '../browser/gallery.js';
+import { recordDownload, loadProjectCache, saveProjectCache } from '../utils/media-index.js';
+import { fetchProjectContents, upsampleImage, mediaDownloadUrl } from '../browser/flow-api.js';
+import { getMostRecentProject } from '../navigation/project-navigator.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -16,12 +18,16 @@ import os from 'os';
 const REPORT_AND_OFFER_TO_OPEN_HINT =
   'Report this exact filePath to the user, then ask if they want it opened now with their OS default image viewer — do not open it without asking.';
 
-// Build a filename base from the generation's own on-page title plus a short id
+// Build a filename base from the generation's own title plus a short id
 // suffix (still unique across re-downloads/edits of the same title) — sanitized
 // to filesystem-safe characters. Returns null if there's no usable title, so
 // callers fall back to their existing opaque-id naming.
 function titleToFilenameBase(title, shortId) {
-  const cleaned = (title || '').trim().replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
+  const cleaned = (title || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 60);
   return cleaned ? `${cleaned}_${shortId}` : null;
 }
 
@@ -36,48 +42,205 @@ export async function handleDownloadLatest(args = {}) {
     );
   }
 
-  // Optional explicit target generation — navigate there first; both the 1K and
-  // 2K paths below then simply operate on "whatever's on screen now", same as
-  // their existing default (no id) behavior.
+  // Optional explicit target generation — navigate there first
   if (args?.id) {
     await navigateToGeneration(page, { id: args.id });
   }
 
   if (resolution === '2K') {
-    // Reproduced 5/5 on three different generations: Flow's upscale returns
-    // "Upscaling Failed!" under --headless=new and succeeds immediately once
-    // reconnected headed. Failing here costs nothing; attempting it burns a
-    // 60-second timeout per call and reports the wrong cause. force:true stays
-    // available in case this turns out to be a server-side condition rather
-    // than a permanent property of headless.
+    // Resolve target editId and projectId
+    let editId = args?.id || null;
+    if (!editId && /\/edit\//.test(page.url())) {
+      editId = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || null;
+    }
+    if (!editId) {
+      const [latest] = await listGenerations(page, { limit: 1 });
+      if (latest?.id) {
+        editId = latest.id;
+        await navigateToGeneration(page, { id: editId });
+      }
+    }
+
+    const projectId =
+      page.url().split('/project/')[1]?.split(/[/?#]/)[0] ||
+      args?.project_id ||
+      getMostRecentProject()?.id;
+
+    let cache = projectId ? loadProjectCache(projectId) : null;
+    if (!cache && projectId && page) {
+      try {
+        cache = await fetchProjectContents(page, projectId);
+        saveProjectCache(cache);
+      } catch {
+        /* proceed if project fetch fails */
+      }
+    }
+
+    const gen = (cache?.generations || []).find((g) => g.editId === editId);
+    const title2k = gen?.title || null;
+    const titledName2k = title2k
+      ? `${titleToFilenameBase(title2k, (editId || '2k').slice(0, 8))}.png`
+      : null;
+
+    // -------------------------------------------------------------------------
+    // Step 1: Cache already lists an upscale medium for this generation -> direct GET
+    // -------------------------------------------------------------------------
+    const existingUpscale = (cache?.media || []).find((m) => m.editId === editId && m.derived);
+    if (existingUpscale?.mediaId) {
+      logger.info('Found existing 2K upscale in cache, attempting direct GET', {
+        editId,
+        mediaId: existingUpscale.mediaId,
+      });
+      try {
+        const downloadUrl = mediaDownloadUrl(existingUpscale.mediaId);
+        const response = await page.request.get(downloadUrl, { timeout: 30000 });
+        if (response && response.ok()) {
+          const buffer = await response.body();
+          const contentType = response.headers()['content-type'] || '';
+          const ext = contentType === 'image/png' ? 'png' : 'jpg';
+          const { fullPath } = resolveDownloadPath('image', {
+            filename: args.filename,
+            suggestedFilename:
+              (title2k ? `${titleToFilenameBase(title2k, (editId || '2k').slice(0, 8))}.${ext}` : null) ||
+              `upscaled_2k_${(editId || existingUpscale.mediaId).slice(0, 8)}.${ext}`,
+            model: 'download-2k',
+            jobId: `upscaled_2k_${Date.now()}`,
+          });
+          fs.writeFileSync(fullPath, buffer);
+          const stat = fs.statSync(fullPath);
+
+          recordDownload({
+            editId: editId || existingUpscale.mediaId,
+            mediaId: existingUpscale.mediaId,
+            path: fullPath,
+            resolution: '2K',
+            bytes: stat.size,
+            method: 'cached-api-2k',
+          });
+
+          logger.info('Downloaded existing 2K upscale directly via API', {
+            fullPath,
+            size: stat.size,
+          });
+          return {
+            status: 'success',
+            method: 'cached-api-2k',
+            resolution: '2K',
+            filePath: fullPath,
+            size: stat.size,
+            hint: REPORT_AND_OFFER_TO_OPEN_HINT,
+          };
+        }
+      } catch (err) {
+        logger.warn('Direct fetch of cached 2K upscale failed, falling forward', {
+          error: err.message,
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 2: None yet -> call upsampleImage() via Flow backend, then GET id
+    // -------------------------------------------------------------------------
+    let targetMediaId = args.media_id || gen?.primaryMediaId || null;
+    if (!targetMediaId && cache?.media) {
+      const nonDerived = cache.media.filter((m) => m.editId === editId && !m.derived);
+      if (nonDerived.length) targetMediaId = nonDerived[nonDerived.length - 1].mediaId;
+    }
+    if (!targetMediaId && /\/edit\//.test(page.url())) {
+      targetMediaId = await getMainPreviewMediaId(page).catch(() => null);
+    }
+
+    if (targetMediaId && projectId) {
+      logger.info('Attempting 2K upscale via Flow API', {
+        editId,
+        mediaId: targetMediaId,
+        projectId,
+      });
+      try {
+        const upscaled = await upsampleImage(page, {
+          mediaId: targetMediaId,
+          projectId,
+          resolution: '2K',
+          paygateTier: cache?.paygateTier,
+        });
+
+        const downloadUrl = mediaDownloadUrl(upscaled.mediaId);
+        const response = await page.request.get(downloadUrl, { timeout: 30000 });
+        if (response && response.ok()) {
+          const buffer = await response.body();
+          const contentType = response.headers()['content-type'] || '';
+          const ext = contentType === 'image/png' ? 'png' : 'jpg';
+          const { fullPath } = resolveDownloadPath('image', {
+            filename: args.filename,
+            suggestedFilename:
+              (title2k ? `${titleToFilenameBase(title2k, (editId || '2k').slice(0, 8))}.${ext}` : null) ||
+              `upscaled_2k_${(editId || upscaled.mediaId).slice(0, 8)}.${ext}`,
+            model: 'download-2k',
+            jobId: `upscaled_2k_${Date.now()}`,
+          });
+          fs.writeFileSync(fullPath, buffer);
+          const stat = fs.statSync(fullPath);
+
+          recordDownload({
+            editId: editId || upscaled.mediaId,
+            mediaId: upscaled.mediaId,
+            path: fullPath,
+            resolution: '2K',
+            bytes: stat.size,
+            method: 'api-upscale-2k',
+          });
+
+          // Refresh the cache asynchronously so subsequent index queries see the new upscale
+          fetchProjectContents(page, projectId)
+            .then((fresh) => saveProjectCache(fresh))
+            .catch(() => {});
+
+          logger.info('2K upscale completed via API and saved', { fullPath, size: stat.size });
+          return {
+            status: 'success',
+            method: 'api-upscale-2k',
+            resolution: '2K',
+            filePath: fullPath,
+            size: stat.size,
+            hint: REPORT_AND_OFFER_TO_OPEN_HINT,
+          };
+        }
+      } catch (err) {
+        logger.warn('Direct API upscale failed, falling back to UI upscale flow', {
+          error: err.message,
+        });
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 3: UI Fallback Flow (today's UI path unchanged)
+    // -------------------------------------------------------------------------
     const launchMode = getLaunchMode();
     if (launchMode?.headless && args.force !== true) {
       throw new FlowError(
         ErrorCodes.NOT_SUPPORTED,
-        '2K upscale does not work in headless Chrome — Flow answers "Upscaling Failed!" (reproduced 5/5). ' +
-        'Reconnect headed with flow_connect{headless:false}, or {virtual_display:true} to keep it off your screen, ' +
-        'then retry. 1K downloads are unaffected. Pass force:true to attempt anyway.'
+        '2K upscale UI flow does not work in headless Chrome — Flow answers "Upscaling Failed!" (reproduced 5/5). ' +
+          'Reconnect headed with flow_connect{headless:false}, or {virtual_display:true} to keep it off your screen, ' +
+          'then retry. 1K downloads are unaffected. Pass force:true to attempt anyway.'
       );
     }
-    logger.info('Attempting 2K upscaled UI download');
+
+    logger.info('Attempting 2K upscaled UI download (fallback path)');
     try {
-      // The Download button with the 1K/2K/4K menu only exists on a specific
-      // generation's /edit/{mediaId} page, not on the gallery grid — navigate there
-      // first if we're not already on one. Grid is newest-first (confirmed live),
-      // so "latest" is the first tile from listGenerations.
       if (!/\/edit\//.test(page.url())) {
         const [latest] = await listGenerations(page, { limit: 1 });
         if (!latest) {
-          throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-            'Could not find a gallery tile link to the latest generation.');
+          throw new FlowError(
+            ErrorCodes.DOWNLOAD_FAILED,
+            'Could not find a gallery tile link to the latest generation.'
+          );
         }
         await navigateToGeneration(page, { id: latest.id });
       }
 
-      // The edit page can still be rendering the full-size image (and its
-      // toolbar) right after navigation/networkidle — poll rather than
-      // checking once, same race as the composer after settings-panel close.
-      const downloadBtnLocator = page.locator('button:has-text("Download"), [aria-label*="download" i]').first();
+      const downloadBtnLocator = page
+        .locator('button:has-text("Download"), [aria-label*="download" i]')
+        .first();
       let downloadBtnVisible = false;
       const btnDeadline = Date.now() + 5000;
       while (!downloadBtnVisible && Date.now() < btnDeadline) {
@@ -86,34 +249,33 @@ export async function handleDownloadLatest(args = {}) {
       }
       if (!downloadBtnVisible) {
         await takeScreenshot(page, '2k-download-btn-not-found');
-        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, 'Download button not visible on page for 2K upscale');
+        throw new FlowError(
+          ErrorCodes.DOWNLOAD_FAILED,
+          'Download button not visible on page for 2K upscale'
+        );
       }
 
       await downloadBtnLocator.click();
       await page.waitForTimeout(500);
 
-      const menu2kOption = page.locator('button, [role="menuitem"], [role="option"]').filter({ hasText: /2K/ }).first();
+      const menu2kOption = page
+        .locator('button, [role="menuitem"], [role="option"]')
+        .filter({ hasText: /2K/ })
+        .first();
       const menu2kVisible = await menu2kOption.isVisible().catch(() => false);
       if (!menu2kVisible) {
         await takeScreenshot(page, '2k-option-not-found');
         throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, '"2K / Upscaled" menu option not found');
       }
 
-      // Playwright's page.on('download')/download.saveAs() intercepts the
-      // download as a blob: URL and copies it via its own temp artifact —
-      // confirmed live (VibeVoice batch run) that copy can throw ENOENT
-      // ("no such file or directory, copyfile /tmp/playwright-artifacts-...")
-      // even though Chrome's own "Upscaling complete, downloaded!" toast
-      // fired, and on some profiles no leaked copy lands in ~/Downloads to
-      // fall back to either — the blob: URL itself also gets revoked by
-      // Chrome's own download handler shortly after, so refetching it from
-      // the page is an equally losing race. The reliable fix (confirmed live
-      // via a throwaway CDP script) is to bypass all of that and have Chrome
-      // itself write the file straight to disk via the DevTools Protocol.
       const scratchDir = path.join(os.tmpdir(), 'flow-mcp-2k-downloads');
       fs.mkdirSync(scratchDir, { recursive: true });
       const cdp = await page.context().newCDPSession(page);
-      await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: scratchDir, eventsEnabled: true });
+      await cdp.send('Browser.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: scratchDir,
+        eventsEnabled: true,
+      });
 
       let completed = null;
       let canceled = false;
@@ -122,9 +284,6 @@ export async function handleDownloadLatest(args = {}) {
         else if (e.state === 'canceled') canceled = true;
       });
 
-      // Capture the media id BEFORE the upscale runs. Afterwards the caller has
-      // no way to say which history step this file belongs to, which is why 2K
-      // downloads could never be attributed to a step in the index.
       const mediaId2k = await getMainPreviewMediaId(page);
 
       await menu2kOption.click();
@@ -145,39 +304,46 @@ export async function handleDownloadLatest(args = {}) {
         throw new FlowError(
           ErrorCodes.UPSCALE_FAILED,
           `Flow refused the 2K upscale: "${toast.text}". The generation itself is fine and still downloadable at 1K. ` +
-          (getLaunchMode()?.headless
-            ? 'This browser is headless, which is the known cause — reconnect with flow_connect{headless:false}.'
-            : 'Retry; if it keeps failing, the 1K original is unaffected.')
+            (getLaunchMode()?.headless
+              ? 'This browser is headless, which is the known cause — reconnect with flow_connect{headless:false}.'
+              : 'Retry; if it keeps failing, the 1K original is unaffected.')
         );
       }
       if (!completed) {
         await takeScreenshot(page, '2k-download-timeout');
-        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, 'Timed out waiting for the 2K upscaled download to complete');
+        throw new FlowError(
+          ErrorCodes.DOWNLOAD_FAILED,
+          'Timed out waiting for the 2K upscaled download to complete'
+        );
       }
 
       const editRouteId2k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || 'download';
-      // Always read the on-page title now — it's what feeds the session log's
-      // clickable table, independent of whether the caller also gave an
-      // explicit filename for the file on disk.
-      const title2k = await getGenerationTitle(page).catch(() => null);
-      const titledName2k = title2k ? `${titleToFilenameBase(title2k, editRouteId2k.slice(0, 8))}${path.extname(completed.filePath)}` : null;
       const { fullPath } = resolveDownloadPath('image', {
         filename: args.filename,
-        suggestedFilename: titledName2k || path.basename(completed.filePath),
+        suggestedFilename:
+          titledName2k ||
+          `${titleToFilenameBase(null, editRouteId2k.slice(0, 8)) || path.basename(completed.filePath)}`,
         model: 'download-2k',
         jobId: `upscaled_2k_${Date.now()}`,
       });
-      // renameSync throws EXDEV across filesystems (scratchDir is /tmp,
-      // typically a different mount than the project's outputs/ dir).
+
       fs.copyFileSync(completed.filePath, fullPath);
       fs.unlinkSync(completed.filePath);
       const stat = fs.statSync(fullPath);
 
-      recordGeneration({ editId: editRouteId2k, editUrl: page.url(), title: title2k });
-      recordDownload({ editId: editRouteId2k, mediaId: mediaId2k, path: fullPath,
-                       resolution: '2K', bytes: stat.size, method: 'ui-upscale-2k' });
+      recordDownload({
+        editId: editRouteId2k,
+        mediaId: mediaId2k,
+        path: fullPath,
+        resolution: '2K',
+        bytes: stat.size,
+        method: 'ui-upscale-2k',
+      });
 
-      logger.info('2K upscaled file saved via CDP download to project outputs', { fullPath, size: stat.size });
+      logger.info('2K upscaled file saved via CDP download to project outputs', {
+        fullPath,
+        size: stat.size,
+      });
       return {
         status: 'success',
         method: 'ui-upscale-2k',
@@ -192,38 +358,46 @@ export async function handleDownloadLatest(args = {}) {
     }
   }
 
-  // Default: 1K direct-API path (completely untouched)
+  // Default: 1K direct-API path
   logger.info('Attempting to download latest result (1K direct API)');
   try {
-    // The /edit/{id} URL's id is the edit-route id, NOT the img's own
-    // fetchable media id — confirmed live these are different id namespaces
-    // even on the exact same tile/page. Fetching media.getMediaUrlRedirect
-    // with the edit-route id silently fails. Always resolve the media id from
-    // the actual <img> on the page, never from the URL — unless the caller
-    // gave one explicitly (recovering a specific superseded history step;
-    // confirmed live this endpoint still resolves those, see flow_generation_history).
-    const mediaId = args.media_id || await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      for (const img of imgs) {
-        const src = img.src || '';
-        const m = src.match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
-        if (m && img.width > 100) return m[1];
-      }
-      return null;
-    }).catch(() => null);
+    const editRouteId1k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || null;
+    const projectId =
+      page.url().split('/project/')[1]?.split(/[/?#]/)[0] ||
+      args?.project_id ||
+      getMostRecentProject()?.id;
+
+    const cache = projectId ? loadProjectCache(projectId) : null;
+    const gen = editRouteId1k ? (cache?.generations || []).find((g) => g.editId === editRouteId1k) : null;
+    const title1k = gen?.title || null;
+
+    const mediaId =
+      args.media_id ||
+      (await page
+        .evaluate(() => {
+          const imgs = Array.from(document.querySelectorAll('img'));
+          for (const img of imgs) {
+            const src = img.src || '';
+            const m = src.match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
+            if (m && img.width > 100) return m[1];
+          }
+          return null;
+        })
+        .catch(() => null));
 
     if (mediaId) {
       logger.info('Found mediaId for direct fetch', { mediaId });
 
-      const downloadUrl = `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=${mediaId}`;
+      const downloadUrl = mediaDownloadUrl(mediaId);
       const response = await page.request.get(downloadUrl, { timeout: 15000 });
 
       if (response && response.ok()) {
         const buffer = await response.body();
         const contentType = response.headers()['content-type'] || '';
         const ext = contentType === 'image/png' ? 'png' : 'jpg';
-        const title1k = await getGenerationTitle(page).catch(() => null);
-        const titledName1k = title1k ? `${titleToFilenameBase(title1k, mediaId.substring(0, 8))}.${ext}` : null;
+        const titledName1k = title1k
+          ? `${titleToFilenameBase(title1k, mediaId.substring(0, 8))}.${ext}`
+          : null;
         const { fullPath } = resolveDownloadPath('image', {
           filename: args.filename,
           suggestedFilename: titledName1k || `latest_${mediaId.substring(0, 8)}.${ext}`,
@@ -232,12 +406,20 @@ export async function handleDownloadLatest(args = {}) {
         });
         fs.writeFileSync(fullPath, buffer);
 
-        const editRouteId1k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || mediaId;
-        recordGeneration({ editId: editRouteId1k, editUrl: page.url(), title: title1k });
-        recordDownload({ editId: editRouteId1k, mediaId, path: fullPath,
-                         resolution: '1K', bytes: buffer.length, method: 'direct-api' });
+        const effectiveEditId = editRouteId1k || mediaId;
+        recordDownload({
+          editId: effectiveEditId,
+          mediaId,
+          path: fullPath,
+          resolution: '1K',
+          bytes: buffer.length,
+          method: 'direct-api',
+        });
 
-        logger.info('Downloaded image directly via mediaId API', { path: fullPath, size: buffer.length });
+        logger.info('Downloaded image directly via mediaId API', {
+          path: fullPath,
+          size: buffer.length,
+        });
         return {
           status: 'success',
           method: 'direct-api',
@@ -251,8 +433,10 @@ export async function handleDownloadLatest(args = {}) {
     }
 
     await takeScreenshot(page, 'no-media-id-found');
-    throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-      'Could not find a fetchable media id in the page\'s images to download at 1K.');
+    throw new FlowError(
+      ErrorCodes.DOWNLOAD_FAILED,
+      "Could not find a fetchable media id in the page's images to download at 1K."
+    );
   } catch (err) {
     if (err instanceof FlowError) throw err;
     throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, `Download failed: ${err.message}`);

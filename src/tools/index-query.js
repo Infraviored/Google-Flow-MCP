@@ -1,43 +1,84 @@
 import { getPage, isBrowserConnected } from '../browser/connect.js';
-import { openAndSync } from './generation-context.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { fetchProjectContents } from '../browser/flow-api.js';
+import { getMostRecentProject } from '../navigation/project-navigator.js';
 import {
-  view, findByTitle, findByMediaId, listGenerationsIndexed,
-  listOrphanDownloads, renderMarkdown, indexLocation, importProjectContents,
+  view,
+  findByTitle,
+  findByMediaId,
+  listGenerationsIndexed,
+  listOrphanDownloads,
+  renderMarkdown,
+  indexLocation,
+  saveProjectCache,
+  loadAllProjectCaches,
 } from '../utils/media-index.js';
+import { projectCachePath } from '../utils/paths.js';
 
-// One read surface over the catalog. Replaces flow_open_generation (navigate),
-// flow_generation_history (steps) and flow_session_log (table) — all three were
-// asking the same question with different amounts of guesswork attached.
+async function refreshCacheIfPossible(projectId = null) {
+  if (!isBrowserConnected()) return false;
+  const page = getPage();
+  const effectiveProjectId =
+    projectId ||
+    page.url().split('/project/')[1]?.split(/[/?#]/)[0] ||
+    getMostRecentProject()?.id;
+  if (!effectiveProjectId) return false;
+  try {
+    const contents = await fetchProjectContents(page, effectiveProjectId);
+    saveProjectCache(contents);
+    return contents;
+  } catch {
+    return false;
+  }
+}
+
+// One read surface over the catalog. Reads hit the local project cache joined
+// with downloads.json, refreshing from Flow's project endpoint when requested
+// or when the cache is empty.
 export async function handleIndexQuery(args = {}) {
   const format = args.format || 'json';
 
-  // Bulk import straight from Flow's own project endpoint. One request carries
-  // every generation's title and every media item's full prompt — including
-  // work this MCP never made — so this is the cheap way to make the catalog
-  // complete rather than only knowing what passed through here.
+  // Explicit sync of a project from Flow's own endpoint.
   if (args.sync_project) {
+    if (!isBrowserConnected()) {
+      throw new FlowError(
+        ErrorCodes.BROWSER_NOT_RUNNING,
+        'Cannot sync project without a connected browser. Connect first via flow_connect.'
+      );
+    }
     const page = getPage();
-    const projectId = args.project_id
-      || page.url().split('/project/')[1]?.split(/[/?#]/)[0];
+    const projectId =
+      args.project_id || page.url().split('/project/')[1]?.split(/[/?#]/)[0] || getMostRecentProject()?.id;
     if (!projectId) {
-      throw new FlowError(ErrorCodes.INVALID_PARAMS,
-        'No project in the current URL — pass project_id, or open a project first.');
+      throw new FlowError(
+        ErrorCodes.INVALID_PARAMS,
+        'No project in current URL or args — pass project_id, or open a project first.'
+      );
     }
     const contents = await fetchProjectContents(page, projectId);
-    const counts = importProjectContents(contents);
+    saveProjectCache(contents);
     return {
       projectId,
       fetched: { generations: contents.generations.length, media: contents.media.length },
-      imported: counts,
-      indexPath: indexLocation(),
+      cachePath: projectCachePath(projectId),
+      downloadsPath: indexLocation(),
     };
+  }
+
+  // If there are no caches at all on disk and a browser is connected, seed the cache.
+  const initialCaches = loadAllProjectCaches();
+  if (!initialCaches.length && isBrowserConnected()) {
+    await refreshCacheIfPossible(args.project_id);
+  }
+
+  // Explicit refresh requested
+  if (args.refresh === true) {
+    await refreshCacheIfPossible(args.project_id);
   }
 
   if (args.orphans) {
     const files = listOrphanDownloads();
-    return { indexPath: indexLocation(), orphanCount: files.length, orphans: files };
+    return { downloadsPath: indexLocation(), orphanCount: files.length, orphans: files };
   }
 
   let editId = args.id || null;
@@ -47,50 +88,59 @@ export async function handleIndexQuery(args = {}) {
   }
 
   if (!editId && args.media_id) {
-    editId = findByMediaId(args.media_id)?.editId || null;
-    if (!editId) throw new FlowError(ErrorCodes.INVALID_PARAMS, `No indexed generation contains media id "${args.media_id}".`);
+    let found = findByMediaId(args.media_id);
+    if (!found && isBrowserConnected() && args.refresh !== false) {
+      await refreshCacheIfPossible(args.project_id);
+      found = findByMediaId(args.media_id);
+    }
+    editId = found?.editId || null;
+    if (!editId) {
+      throw new FlowError(
+        ErrorCodes.INVALID_PARAMS,
+        `No indexed generation contains media id "${args.media_id}".`
+      );
+    }
   }
 
   if (!editId && args.title) {
-    const hits = findByTitle(args.title);
-    if (!hits.length) {
-      throw new FlowError(ErrorCodes.INVALID_PARAMS,
-        `No indexed generation matches title "${args.title}". Use flow_index with no arguments to list what is known.`);
+    let hits = findByTitle(args.title);
+    if (!hits.length && isBrowserConnected() && args.refresh !== false) {
+      await refreshCacheIfPossible(args.project_id);
+      hits = findByTitle(args.title);
     }
-    // Never pick for the caller when the title is ambiguous — near-identical
-    // titles are exactly where a confident guess does real damage.
+    if (!hits.length) {
+      throw new FlowError(
+        ErrorCodes.INVALID_PARAMS,
+        `No indexed generation matches title "${args.title}". Use flow_index with no arguments to list what is known.`
+      );
+    }
     if (hits.length > 1) return { ambiguous: true, matches: hits };
     editId = hits[0].editId;
   }
 
   if (!editId) {
     if (format === 'markdown') return { markdown: renderMarkdown() };
-    return { indexPath: indexLocation(), generations: listGenerationsIndexed({ limit: args.limit || 20 }) };
+    return {
+      downloadsPath: indexLocation(),
+      generations: listGenerationsIndexed({ limit: args.limit || 20 }),
+    };
   }
 
-  // Refresh from the live DOM when a browser is available, so the answer
-  // reflects edits made outside this MCP. Falls back to the stored record when
-  // there is no browser — the whole point of persisting it.
-  if (isBrowserConnected() && args.refresh !== false) {
-    try {
-      await openAndSync(getPage(), { id: editId });
-    } catch (err) {
-      // A navigation failure must not deny the caller the record we already
-      // hold; report it instead of throwing the stored answer away.
-      const stored = view(editId, { fullPrompts: args.full_prompts, step: args.step ?? null });
-      if (stored) return { ...stored, refreshFailed: err.message };
-      throw err;
-    }
+  let record = view(editId, { fullPrompts: args.full_prompts, step: args.step ?? null });
+  if (!record && isBrowserConnected() && args.refresh !== false) {
+    await refreshCacheIfPossible(args.project_id);
+    record = view(editId, { fullPrompts: args.full_prompts, step: args.step ?? null });
   }
 
-  const record = view(editId, { fullPrompts: args.full_prompts, step: args.step ?? null });
-  if (!record) throw new FlowError(ErrorCodes.INVALID_PARAMS, `Nothing indexed for generation "${editId}".`);
+  if (!record) {
+    throw new FlowError(ErrorCodes.INVALID_PARAMS, `Nothing indexed for generation "${editId}".`);
+  }
 
   if (format === 'markdown') return { markdown: renderMarkdown([editId]) };
   if (format === 'compact') {
     return {
-      compact: (record.steps || []).map(s => {
-        const res = (s.dl || []).map(d => d.res).join(',');
+      compact: (record.steps || []).map((s) => {
+        const res = (s.dl || []).map((d) => d.res).join(',');
         return `${s.n ?? '?'} ${s.mediaId?.slice(0, 8)} [${res || '-'}] ${s.variant || ''} ${s.prompt || ''}`.trim();
       }),
     };
