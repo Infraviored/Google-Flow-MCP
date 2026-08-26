@@ -166,12 +166,14 @@ export async function listHistorySteps(page) {
     const nodes = Array.from(document.querySelectorAll('[id^="history-step-"]'));
     return nodes.map((step, index) => {
       const idMatch = step.id.match(/^history-step-fe_id_(.+)$/);
-      // A step holds TWO getMediaUrlRedirect images: its own result and a small
-      // chip for the image it was derived from. querySelector takes whichever
-      // comes first in the DOM, which is right only by luck of current markup.
-      // The element's own id suffix is the authoritative media id; the img is
-      // kept as a cross-check so a future markup change surfaces as a warning
-      // rather than as silently mis-attributed downloads.
+      // The thumbnail's src is the authoritative media id, NOT the element's
+      // id suffix. The suffix is the data-tile-id namespace, which usually
+      // carries the same value but does not have to: caught live on a
+      // freshly-generated step whose suffix held a transient id that returned
+      // 404 from getMediaUrlRedirect while the img src resolved 200. The img
+      // src is self-validating — it is the URL the browser is already
+      // successfully rendering — so it wins, and the suffix is only a fallback
+      // for a step whose thumbnail has not mounted yet.
       const img = step.querySelector('img[src*="getMediaUrlRedirect"]');
       const mediaMatch = img && (img.src || '').match(/name=([a-f0-9-]+)/);
       const reuseBtn = step.querySelector('.reuse-prompt-button');
@@ -182,20 +184,27 @@ export async function listHistorySteps(page) {
       return {
         index,
         tileId: fromId,
-        mediaId: fromId || fromImg,
+        mediaId: fromImg || fromId,
+        // Signals a still-settling panel: the caller should treat this step as
+        // provisional rather than record it as fact.
         mediaIdMismatch: !!(fromId && fromImg && fromId !== fromImg),
+        unmounted: !fromImg,
         prompt: promptText,
       };
     });
   }).catch(() => []);
 
-  const mismatched = steps.filter(s => s.mediaIdMismatch);
-  if (mismatched.length) {
-    logger.warn('History step id disagrees with its thumbnail src — Flow markup may have changed', {
-      count: mismatched.length,
+  // A step read before its thumbnail mounted carries an id we cannot trust —
+  // recording it invents a phantom step that no download will ever attach to,
+  // and whose id is not even fetchable. Drop those rather than store them.
+  const provisional = steps.filter(s => s.unmounted || s.mediaIdMismatch);
+  if (provisional.length) {
+    logger.warn('Dropping history steps read before their thumbnail settled', {
+      count: provisional.length,
+      of: steps.length,
     });
   }
-  return steps;
+  return steps.filter(s => !s.unmounted && !s.mediaIdMismatch);
 }
 
 // Gallery grid tiles: [data-tile-id="fe_id_..."] wrapping an
