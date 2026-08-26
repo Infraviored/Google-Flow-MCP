@@ -11,14 +11,14 @@
 // arrays are skipped rather than imported as phantom downloads.
 import fs from 'fs';
 import path from 'path';
-import { recordGeneration, recordStep, listOrphanDownloads, indexLocation } from '../src/utils/media-index.js';
+import { recordGeneration, listOrphanDownloads, indexLocation } from '../src/utils/media-index.js';
 
 const SOURCES = [
   path.resolve(import.meta.dirname, '..', 'outputs', 'metadata'),
   '/home/schneider/repos_private/VibeVoice/outputs/metadata',
 ];
 
-let files = 0, generations = 0, steps = 0, skipped = 0;
+let files = 0, generations = 0, skipped = 0;
 
 for (const dir of SOURCES) {
   if (!fs.existsSync(dir)) { console.log(`skip (absent): ${dir}`); continue; }
@@ -29,21 +29,13 @@ for (const dir of SOURCES) {
     files++;
 
     const editIds = meta.editIds || [];
-    const mediaIds = meta.imageUuids || [];
     if (!editIds.length) { skipped++; continue; }
 
-    // editIds[i] and imageUuids[i] were pushed in the same order by the same
-    // loop, so position is the only link available — and it is the real one.
     for (let i = 0; i < editIds.length; i++) {
       const editId = editIds[i];
       if (!editId) continue;
       recordGeneration({ editId, model: meta.model, ratio: meta.ratio });
       generations++;
-      const mediaId = mediaIds[i];
-      if (mediaId) {
-        recordStep({ editId, mediaId, prompt: meta.prompt, source: 'migrated' });
-        steps++;
-      }
     }
   }
 }
@@ -51,7 +43,6 @@ for (const dir of SOURCES) {
 console.log(`\nindex: ${indexLocation()}`);
 console.log(`metadata files read : ${files}`);
 console.log(`generations recorded: ${generations}`);
-console.log(`steps recorded      : ${steps}`);
 console.log(`skipped (no editIds): ${skipped}`);
 
 const orphans = listOrphanDownloads();

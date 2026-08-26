@@ -25,8 +25,22 @@ export function dataDir() {
   return dir;
 }
 
+export function downloadsPath() {
+  return path.join(dataDir(), 'downloads.json');
+}
+
 export function indexPath() {
-  return path.join(dataDir(), 'media-index.json');
+  return downloadsPath();
+}
+
+export function cacheDir() {
+  const dir = path.join(dataDir(), 'cache');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function projectCachePath(projectId) {
+  return path.join(cacheDir(), `${projectId}.json`);
 }
 
 export function projectsPath() {
