@@ -30,8 +30,18 @@ export function get(key, fallback = undefined) {
   return config[key] !== undefined ? config[key] : fallback;
 }
 
+// Only an ABSOLUTE flowHome is honored. A relative one (the config used to
+// carry "." ) resolves against the MCP *client's* cwd, not this repo — and the
+// server is registered under more than one project scope with no cwd set, so
+// outputs/, config/flow.projects.json and selectors.map.json silently forked
+// into per-client copies. That is how outputs/metadata ended up holding 164
+// file references of which zero existed. Relative values are ignored rather
+// than honored, so every path built on this is stable regardless of where the
+// client was started.
 export function getFlowHome() {
-  return config.flowHome || FLOW_HOME;
+  const configured = config.flowHome;
+  if (configured && path.isAbsolute(configured)) return configured;
+  return FLOW_HOME;
 }
 
 // Persists a shallow-merged patch into config/flow.config.json, backing up

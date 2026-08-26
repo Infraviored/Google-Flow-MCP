@@ -5,6 +5,7 @@ outputs/
 chrome-profile-*/
 screenshot*.png
 config/flow.config.json
+config/flow.config.json.bak
 config/flow.projects.json
 .env
 .DS_Store

@@ -1,10 +1,10 @@
-import { getPage } from '../browser/connect.js';
+import { getPage, getLaunchMode } from '../browser/connect.js';
 import { logger } from '../utils/logger.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { resolveDownloadPath } from '../utils/file-manager.js';
-import { navigateToGeneration, listGenerations, getGenerationTitle } from '../browser/gallery.js';
-import { logEntry } from '../utils/session-log.js';
+import { navigateToGeneration, listGenerations, getGenerationTitle, getMainPreviewMediaId, readUpscaleToast } from '../browser/gallery.js';
+import { recordGeneration, recordDownload } from '../utils/media-index.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -44,6 +44,21 @@ export async function handleDownloadLatest(args = {}) {
   }
 
   if (resolution === '2K') {
+    // Reproduced 5/5 on three different generations: Flow's upscale returns
+    // "Upscaling Failed!" under --headless=new and succeeds immediately once
+    // reconnected headed. Failing here costs nothing; attempting it burns a
+    // 60-second timeout per call and reports the wrong cause. force:true stays
+    // available in case this turns out to be a server-side condition rather
+    // than a permanent property of headless.
+    const launchMode = getLaunchMode();
+    if (launchMode?.headless && args.force !== true) {
+      throw new FlowError(
+        ErrorCodes.NOT_SUPPORTED,
+        '2K upscale does not work in headless Chrome — Flow answers "Upscaling Failed!" (reproduced 5/5). ' +
+        'Reconnect headed with flow_connect{headless:false}, or {virtual_display:true} to keep it off your screen, ' +
+        'then retry. 1K downloads are unaffected. Pass force:true to attempt anyway.'
+      );
+    }
     logger.info('Attempting 2K upscaled UI download');
     try {
       // The Download button with the 1K/2K/4K menu only exists on a specific
@@ -107,15 +122,33 @@ export async function handleDownloadLatest(args = {}) {
         else if (e.state === 'canceled') canceled = true;
       });
 
+      // Capture the media id BEFORE the upscale runs. Afterwards the caller has
+      // no way to say which history step this file belongs to, which is why 2K
+      // downloads could never be attributed to a step in the index.
+      const mediaId2k = await getMainPreviewMediaId(page);
+
       await menu2kOption.click();
       logger.info('Clicked 2K upscale download option, waiting for CDP download-completed event');
 
       const deadline = Date.now() + 60000;
+      let toast = null;
       while (!completed && !canceled && Date.now() < deadline) {
         await page.waitForTimeout(300);
+        toast = await readUpscaleToast(page);
+        if (toast?.state === 'failed') break;
       }
       if (canceled) {
         throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, '2K download was canceled by the browser');
+      }
+      if (!completed && toast?.state === 'failed') {
+        await takeScreenshot(page, '2k-upscale-failed');
+        throw new FlowError(
+          ErrorCodes.UPSCALE_FAILED,
+          `Flow refused the 2K upscale: "${toast.text}". The generation itself is fine and still downloadable at 1K. ` +
+          (getLaunchMode()?.headless
+            ? 'This browser is headless, which is the known cause — reconnect with flow_connect{headless:false}.'
+            : 'Retry; if it keeps failing, the 1K original is unaffected.')
+        );
       }
       if (!completed) {
         await takeScreenshot(page, '2k-download-timeout');
@@ -140,7 +173,9 @@ export async function handleDownloadLatest(args = {}) {
       fs.unlinkSync(completed.filePath);
       const stat = fs.statSync(fullPath);
 
-      logEntry({ editId: editRouteId2k, editUrl: page.url(), title: title2k, filePath: fullPath, resolution: '2K' });
+      recordGeneration({ editId: editRouteId2k, editUrl: page.url(), title: title2k });
+      recordDownload({ editId: editRouteId2k, mediaId: mediaId2k, path: fullPath,
+                       resolution: '2K', bytes: stat.size, method: 'ui-upscale-2k' });
 
       logger.info('2K upscaled file saved via CDP download to project outputs', { fullPath, size: stat.size });
       return {
@@ -198,7 +233,9 @@ export async function handleDownloadLatest(args = {}) {
         fs.writeFileSync(fullPath, buffer);
 
         const editRouteId1k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || mediaId;
-        logEntry({ editId: editRouteId1k, editUrl: page.url(), title: title1k, filePath: fullPath, resolution: '1K' });
+        recordGeneration({ editId: editRouteId1k, editUrl: page.url(), title: title1k });
+        recordDownload({ editId: editRouteId1k, mediaId, path: fullPath,
+                         resolution: '1K', bytes: buffer.length, method: 'direct-api' });
 
         logger.info('Downloaded image directly via mediaId API', { path: fullPath, size: buffer.length });
         return {

@@ -5,26 +5,22 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { detectPageElements } from '../browser/safe-actions.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { recoverFromCrash } from '../browser/launch-profile.js';
+import { projectsPath } from '../utils/paths.js';
+import { readJson, writeJsonAtomic, withFileLock } from '../utils/atomic-json.js';
 import fs from 'fs';
 import path from 'path';
 
-const PROJECTS_FILE = path.resolve(get('flowHome', '.'), 'config', 'flow.projects.json');
+// A Flow project is a cloud entity under one account, so this registry is
+// global — it used to resolve against the client's cwd, which forked it into
+// per-client copies holding different projects.
+const PROJECTS_FILE = projectsPath();
 
 export function loadProjects() {
-  try {
-    if (fs.existsSync(PROJECTS_FILE)) {
-      return JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf-8'));
-    }
-  } catch (e) {
-    logger.warn('Could not load projects file', { error: e.message });
-  }
-  return { projects: [] };
+  return readJson(PROJECTS_FILE, { projects: [] });
 }
 
 function saveProjects(data) {
-  const dir = path.dirname(PROJECTS_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(PROJECTS_FILE, JSON.stringify(data, null, 2));
+  withFileLock(PROJECTS_FILE, () => writeJsonAtomic(PROJECTS_FILE, data));
 }
 
 // The most-recently-used cached project, if any — lets flow_connect map straight

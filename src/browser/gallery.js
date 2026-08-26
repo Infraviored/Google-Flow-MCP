@@ -127,24 +127,75 @@ export async function getGenerationTitle(page) {
 // instruction text that produced it, next to a `button.reuse-prompt-button`
 // (a stable, non-hashed class — unlike everything else in this file, safe to
 // select directly). No screenshot needed to read any of this.
+// A closed panel yields zero steps, which is indistinguishable from "this
+// generation has no history" to every caller — the worst possible failure for
+// something whose whole job is recording what exists. Open it first.
+async function ensureHistoryPanelOpen(page) {
+  const count = await page.locator('[id^="history-step-"]').count().catch(() => 0);
+  if (count > 0) return true;
+  // Only ever the "Show" affordance — clicking "Hide history" here would
+  // actively close a panel that was already fine.
+  const toggle = page.locator('button:has-text("Show history"), [aria-label*="show history" i]').first();
+  if (!(await toggle.isVisible().catch(() => false))) return false;
+  await toggle.click().catch(() => {});
+  await page.waitForSelector('[id^="history-step-"]', { timeout: 3000 }).catch(() => {});
+  return (await page.locator('[id^="history-step-"]').count().catch(() => 0)) > 0;
+}
+
 export async function listHistorySteps(page) {
-  return page.evaluate(() => {
-    const steps = Array.from(document.querySelectorAll('[id^="history-step-"]'));
-    return steps.map((step, index) => {
+  await ensureHistoryPanelOpen(page);
+
+  // The panel virtualizes like the main grid does, so a long edit chain is
+  // truncated to whatever happens to be mounted. Scroll it loop-until-dry,
+  // same approach listGenerations already uses on the gallery scroller.
+  let previous = -1;
+  for (let i = 0; i < 10; i++) {
+    const count = await page.locator('[id^="history-step-"]').count().catch(() => 0);
+    if (count === previous) break;
+    previous = count;
+    await page.evaluate(() => {
+      const first = document.querySelector('[id^="history-step-"]');
+      const scroller = first?.closest('[data-testid="virtuoso-scroller"]')
+        || first?.parentElement?.parentElement;
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    }).catch(() => {});
+    await page.waitForTimeout(400);
+  }
+
+  const steps = await page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll('[id^="history-step-"]'));
+    return nodes.map((step, index) => {
       const idMatch = step.id.match(/^history-step-fe_id_(.+)$/);
+      // A step holds TWO getMediaUrlRedirect images: its own result and a small
+      // chip for the image it was derived from. querySelector takes whichever
+      // comes first in the DOM, which is right only by luck of current markup.
+      // The element's own id suffix is the authoritative media id; the img is
+      // kept as a cross-check so a future markup change surfaces as a warning
+      // rather than as silently mis-attributed downloads.
       const img = step.querySelector('img[src*="getMediaUrlRedirect"]');
       const mediaMatch = img && (img.src || '').match(/name=([a-f0-9-]+)/);
       const reuseBtn = step.querySelector('.reuse-prompt-button');
       const promptContainer = reuseBtn ? reuseBtn.closest('div')?.parentElement : null;
       const promptText = promptContainer?.firstElementChild?.textContent?.trim() || null;
+      const fromId = idMatch ? idMatch[1] : null;
+      const fromImg = mediaMatch ? mediaMatch[1] : null;
       return {
         index,
-        tileId: idMatch ? idMatch[1] : null,
-        mediaId: mediaMatch ? mediaMatch[1] : null,
+        tileId: fromId,
+        mediaId: fromId || fromImg,
+        mediaIdMismatch: !!(fromId && fromImg && fromId !== fromImg),
         prompt: promptText,
       };
     });
   }).catch(() => []);
+
+  const mismatched = steps.filter(s => s.mediaIdMismatch);
+  if (mismatched.length) {
+    logger.warn('History step id disagrees with its thumbnail src — Flow markup may have changed', {
+      count: mismatched.length,
+    });
+  }
+  return steps;
 }
 
 // Gallery grid tiles: [data-tile-id="fe_id_..."] wrapping an
@@ -281,13 +332,36 @@ async function getMainPreviewImageSize(page) {
   }).catch(() => null);
 }
 
+// Flow reports the outcome of a 2K upscale in a transient toast rather than in
+// anything the download machinery can observe, so a failed upscale used to look
+// exactly like a slow one: the caller waited out the full 60s download timeout
+// and then blamed the timeout. Reading the toast turns that into a ~2s answer
+// with Flow's own wording attached.
+//
+// Deliberately does NOT target a hashed class — those change on every Flow
+// deploy. The live-region roles are semantic and stable, with a whole-document
+// scan as the last resort.
+export async function readUpscaleToast(page) {
+  return await page.evaluate(() => {
+    const pattern = /Upscal(?:ing|e)[^.!]*(Failed|complete)/i;
+    const regions = Array.from(document.querySelectorAll('[role="status"], [role="alert"], [aria-live]'));
+    for (const el of regions) {
+      const m = (el.innerText || '').match(pattern);
+      if (m) return { state: m[1].toLowerCase() === 'failed' ? 'failed' : 'complete', text: m[0].trim() };
+    }
+    const m = (document.body.innerText || '').match(pattern);
+    if (m) return { state: m[1].toLowerCase() === 'failed' ? 'failed' : 'complete', text: m[0].trim() };
+    return null;
+  }).catch(() => null);
+}
+
 // Same virtualized/mount-order risk as verifyNewestTileIds, but for the edit page's
 // version-history side panel instead of the main gallery grid: its small thumbnail
 // <img>s can mount/reflow independently of an actual new edit, so waitForNewMedia's
 // baseline-diff can misattribute an OLD sibling version as the result of THIS edit.
 // The one thing that can't lie about "what did this edit actually produce" is the main
 // (largest-rendered) preview image's own current src — read its media id directly.
-async function getMainPreviewMediaId(page) {
+export async function getMainPreviewMediaId(page) {
   return await page.evaluate(() => {
     const imgs = Array.from(document.querySelectorAll('img'));
     let best = null;

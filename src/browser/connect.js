@@ -124,9 +124,15 @@ async function launchNewBrowser(cdpPort, options = {}) {
     `--window-size=1920,1080`,
   ];
 
-  if (get('headless', false)) {
+  const headlessHere = get('headless', false);
+  if (headlessHere) {
     args.push('--headless=new');
   }
+  // launchChromeDirect is not the only way a browser gets started, and callers
+  // downstream (the 2K upscale guard) need to know whether this one is headless.
+  // Without this assignment that guard silently no-ops on this path and looks
+  // like it is working.
+  lastLaunchMode = { headless: !!headlessHere, virtualDisplay: false, profileDir };
 
   // Kill any existing Chrome on this debugging port
   try {
@@ -401,6 +407,15 @@ export async function closeBrowser() {
   lastLaunchMode = null;
   activeProfileKey = null;
   logger.info('Browser disconnected');
+}
+
+// How the live browser was actually started. Null when nothing has been
+// launched yet. Consumers care mainly about .headless — Flow's 2K upscale
+// fails outright under --headless=new (reproduced 5/5 across three different
+// generations, succeeding immediately headed), so that path has to be able to
+// tell the difference and say so.
+export function getLaunchMode() {
+  return lastLaunchMode;
 }
 
 export function getPage() {

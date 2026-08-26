@@ -23,10 +23,16 @@ function timestamp() {
   return new Date().toISOString();
 }
 
+// Everything goes to stderr, never stdout. This process speaks JSON-RPC over
+// stdout — a stray log line there is a malformed message on the wire, and the
+// only reason it has not broken outright is that clients tend to skip lines
+// they cannot parse. console.log/console.debug write to stdout; console.error
+// and console.warn write to stderr, which is why the two below are used
+// throughout even for non-error levels.
 export const logger = {
   info(msg, data = {}) {
     const line = `[${timestamp()}] INFO  ${msg} ${Object.keys(data).length ? JSON.stringify(data) : ''}`;
-    console.log(line);
+    console.error(line);
     getLogStream().write(line + '\n');
   },
 
@@ -45,7 +51,7 @@ export const logger = {
   debug(msg, data = {}) {
     const line = `[${timestamp()}] DEBUG ${msg} ${Object.keys(data).length ? JSON.stringify(data) : ''}`;
     if (process.env.DEBUG) {
-      console.debug(line);
+      console.error(line);
     }
     getLogStream().write(line + '\n');
   }
