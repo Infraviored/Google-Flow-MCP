@@ -31,6 +31,12 @@ function titleToFilenameBase(title, shortId) {
   return cleaned ? `${cleaned}_${shortId}` : null;
 }
 
+// The medium a generation currently shows. Used when no explicit media_id was
+// given, so "download this generation at 2K" means its current state.
+function primaryMediaIdFor(cache, editId) {
+  return (cache?.generations || []).find((g) => g.editId === editId)?.primaryMediaId || null;
+}
+
 export async function handleDownloadLatest(args = {}) {
   const page = getPage();
   const resolution = (args?.resolution || '1K').toUpperCase();
@@ -85,7 +91,15 @@ export async function handleDownloadLatest(args = {}) {
     // -------------------------------------------------------------------------
     // Step 1: Cache already lists an upscale medium for this generation -> direct GET
     // -------------------------------------------------------------------------
-    const existingUpscale = (cache?.media || []).find((m) => m.editId === editId && m.derived);
+    // Match the upscale to the media the caller actually asked for. Matching on
+    // editId alone returns the first derived medium of the generation, which is
+    // the upscale of whichever step happened to be upscaled first — it silently
+    // served step 1's 2K file for a step 3 request and reported success.
+    const wantMediaId = args.media_id || null;
+    const derived = (cache?.media || []).filter((m) => m.editId === editId && m.derived);
+    const existingUpscale = wantMediaId
+      ? derived.find((m) => m.sourceMediaId === wantMediaId)
+      : derived.find((m) => !m.sourceMediaId || m.sourceMediaId === primaryMediaIdFor(cache, editId)) || derived[0];
     if (existingUpscale?.mediaId) {
       logger.info('Found existing 2K upscale in cache, attempting direct GET', {
         editId,

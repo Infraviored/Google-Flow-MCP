@@ -10,7 +10,8 @@ import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
 import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds, verifyNewestTileIds } from '../browser/gallery.js';
-import { recordGeneration, recordDownload } from '../utils/media-index.js';
+import { recordGeneration, recordDownload, loadProjectCache, saveProjectCache } from '../utils/media-index.js';
+import { generateImages, resolveImageModelKey, fetchProjectContents, mediaDownloadUrl } from '../browser/flow-api.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -43,6 +44,43 @@ function selectRatio(requested) {
 }
 
 let lastAppliedImageSettings = null;
+
+// Download what the API just produced and record it. Kept separate from the
+// composer path so neither has to carry the other's assumptions.
+async function finishApiGeneration({ page, job, media, model, ratio, quantity, args, outputDir, projectId }) {
+  const files = [];
+  for (const m of media) {
+    try {
+      const res = await page.request.get(mediaDownloadUrl(m.mediaId), { timeout: 30000 });
+      if (!res.ok()) continue;
+      const buffer = await res.body();
+      const ext = (res.headers()['content-type'] || '') === 'image/png' ? '.png' : '.jpg';
+      const dest = path.join(outputDir, `flow_${m.mediaId.substring(0, 8)}_${job.id}${ext}`);
+      fs.writeFileSync(dest, buffer);
+      files.push(dest);
+      recordGeneration({ editId: m.editId, model, ratio });
+      recordDownload({ editId: m.editId, mediaId: m.mediaId, path: dest, resolution: '1K', bytes: buffer.length, method: 'api-generate' });
+    } catch (err) {
+      logger.warn('Could not download a generated image', { mediaId: m.mediaId, error: err.message });
+    }
+  }
+  const editUrls = media.map(m => `https://labs.google/fx/en/tools/flow/project/${projectId}/edit/${m.editId}`);
+  return {
+    status: 'success',
+    type: 'image',
+    method: 'api-generate',
+    account: getActiveExpectedAccount(),
+    model_used: model,
+    ratio,
+    files,
+    image_count: files.length,
+    imageUuids: media.map(m => m.mediaId),
+    editIds: media.map(m => m.editId),
+    editUrls,
+    seeds: media.map(m => m.seed),
+    credits_consumed: true,
+  };
+}
 
 export async function handleGenerateImage(args) {
   args.prompt = resolveTextParam(args.prompt, args.prompt_file, { paramName: 'prompt', fileParamName: 'prompt_file' });
@@ -87,6 +125,45 @@ export async function handleGenerateImage(args) {
       await page.goto(projectRootUrl, { waitUntil: 'networkidle', timeout: 30000 });
       await page.waitForTimeout(1500);
     }
+
+    // Resolve model, ratio and quantity from config alone — no UI involved — so
+    // the API attempt below can run before any of the composer setup. When it
+    // succeeds none of that setup was needed; when it fails the UI path re-does
+    // it properly.
+    const modelEarly = selectModel(args.model);
+    const ratioEarly = modelEarly ? selectRatio(args.ratio) : null;
+    const quantityEarly = Math.min(Math.max(args.quantity || 1, 1), 4);
+    const outputDirEarly = args.output_folder || prepareDownload('image', modelEarly || 'auto', job.id).dir;
+    if (args.output_folder && !fs.existsSync(args.output_folder)) {
+      fs.mkdirSync(args.output_folder, { recursive: true });
+    }
+
+    // Preferred path: Flow's own generation endpoint. It returns the new media id
+    // and its workflow id directly, so the whole business of diffing the gallery
+    // to work out which tile is new — and the id-verification that had to guard
+    // it — simply does not arise. The composer path below stays as a fallback.
+    const projectIdApi = page.url().split('/project/')[1]?.split(/[/?#]/)[0] || null;
+    if (projectIdApi && modelEarly && ratioEarly && autoConfirm) {
+      try {
+        let cache = loadProjectCache(projectIdApi);
+        if (!cache) { cache = await fetchProjectContents(page, projectIdApi); saveProjectCache(cache); }
+        const modelKey = resolveImageModelKey(cache, modelEarly);
+        if (modelKey) {
+          const media = await generateImages(page, {
+            projectId: projectIdApi, prompt: args.prompt, modelKey, ratio: ratioEarly, count: quantityEarly,
+          });
+          const apiResult = await finishApiGeneration({
+            page, job, media, model: modelEarly, ratio: ratioEarly, quantity: quantityEarly, args, outputDir: outputDirEarly, projectId: projectIdApi,
+          });
+          jobQueue.completeJob(job.id, apiResult);
+          return jobQueue.getJob(job.id).result;
+        }
+        logger.warn('No model key for this model, using the composer', { model: modelEarly });
+      } catch (err) {
+        logger.warn('API generation failed, falling back to the composer', { error: err.message });
+      }
+    }
+
 
     // STEP 1.5: Always generate from the plain bottom composer ("fresh" mode), never
     // from an open Agent-chat sidebar ("follow-up" mode) — see agent-settings.js.

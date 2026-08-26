@@ -6,6 +6,19 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { get } from '../utils/config.js';
 import { resolveTextParam } from '../utils/file-manager.js';
+import { logger } from '../utils/logger.js';
+import { generateImages, resolveImageModelKey, fetchProjectContents } from '../browser/flow-api.js';
+import { loadProjectCache, saveProjectCache } from '../utils/media-index.js';
+
+// The API wants a ratio name; the cache only knows pixel dimensions. Snap to the
+// nearest supported ratio rather than sending UNSPECIFIED, which lets the edit
+// come back reshaped.
+function nearestRatio(w, h) {
+  if (!w || !h) return null;
+  const a = w / h;
+  const options = [['1:1', 1], ['16:9', 16 / 9], ['9:16', 9 / 16], ['4:3', 4 / 3], ['3:4', 3 / 4]];
+  return options.reduce((best, o) => (Math.abs(o[1] - a) < Math.abs(best[1] - a) ? o : best))[0];
+}
 
 export async function handleEditGeneration(args = {}) {
   args.instruction = resolveTextParam(args.instruction, args.instruction_file, { paramName: 'instruction', fileParamName: 'instruction_file' });
@@ -47,9 +60,50 @@ export async function handleEditGeneration(args = {}) {
     };
   }
 
-  const newMediaIds = await followUpEdit(page, args.instruction, {
-    timeoutMs: get('generationTimeoutMs', 120000),
-  });
+  // Flow's own endpoint takes an edit as a generation that names the workflow it
+  // belongs to and the image it starts from. It returns the new media id
+  // directly, so none of the DOM tile-matching applies, and it lets us send the
+  // real aspect ratio — the composer sends UNSPECIFIED, which is the likeliest
+  // reason edits used to come back reshaped and needed a retry.
+  let newMediaIds = null;
+  const editIdNow = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || null;
+  const projectIdNow = page.url().split('/project/')[1]?.split(/[/?#]/)[0] || null;
+
+  if (editIdNow && projectIdNow) {
+    try {
+      let cache = loadProjectCache(projectIdNow);
+      if (!cache) { cache = await fetchProjectContents(page, projectIdNow); saveProjectCache(cache); }
+
+      // Edit the medium the generation currently shows, not an older step.
+      const gen = (cache.generations || []).find(g => g.editId === editIdNow);
+      const baseMediaId = gen?.primaryMediaId
+        || (cache.media || []).filter(m => m.editId === editIdNow && !m.derived).slice(-1)[0]?.mediaId;
+      const baseMedia = (cache.media || []).find(m => m.mediaId === baseMediaId);
+      const ratio = baseMedia?.dimensions
+        ? nearestRatio(baseMedia.dimensions.width, baseMedia.dimensions.height)
+        : null;
+
+      if (baseMediaId) {
+        const media = await generateImages(page, {
+          projectId: projectIdNow,
+          workflowId: editIdNow,
+          baseMediaId,
+          prompt: args.instruction,
+          modelKey: resolveImageModelKey(cache, args.model || 'Nano Banana Pro'),
+          ratio,
+        });
+        newMediaIds = media.map(m => m.mediaId);
+      }
+    } catch (err) {
+      logger.warn('API edit failed, falling back to the composer', { error: err.message });
+    }
+  }
+
+  if (!newMediaIds) {
+    newMediaIds = await followUpEdit(page, args.instruction, {
+      timeoutMs: get('generationTimeoutMs', 120000),
+    });
+  }
 
   return {
     status: 'success',

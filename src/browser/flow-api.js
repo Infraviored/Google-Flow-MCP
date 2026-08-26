@@ -71,6 +71,14 @@ export async function fetchProjectContents(page, projectId) {
     projectName: root?.projectName || null,
     fetchedAt: new Date().toISOString(),
     paygateTier: root?.userData?.paygateTier || null,
+    // Flow's own model registry, so the display-name -> request-key mapping is
+    // read rather than hardcoded and survives Flow adding or renaming models.
+    imageModels: (root?.modelConfig?.imageModelFamilies || []).map(f => ({
+      id: f.id,
+      displayName: (f.displayName || '').replace(/^[^\w]+\s*/, ''),
+      key: f.usages?.[0]?.key || null,
+      maxImageReferences: f.usages?.[0]?.maxImageReferences ?? null,
+    })).filter(m => m.key),
     generations: workflows.map(w => ({
       editId: w.name,
       title: w.metadata?.displayName || null,
@@ -91,6 +99,12 @@ export async function fetchProjectContents(page, projectId) {
         seed: m.image?.generatedImage?.seed ?? null,
         mediaGenerationId: m.image?.generatedImage?.mediaGenerationId || null,
         createdAt: m.mediaMetadata?.createTime || null,
+        // Which medium this one was made FROM. Every derived medium names its
+        // source, so an upscale can be matched to the exact step it belongs to
+        // rather than to "some derived medium of this generation" — which
+        // silently served the upscale of a different step.
+        sourceMediaId: m.mediaMetadata?.requestData?.imageGenerationRequestData
+          ?.imageGenerationImageInputs?.[0]?.mediaId || null,
         // Measured: carrying a prompt and carrying dimensions coincide exactly
         // (303 of 557 had both, 254 had neither). Media with neither are
         // derived — upscales and the like. Flagged rather than classified,
@@ -195,4 +209,155 @@ export async function upsampleImage(page, { mediaId, projectId, resolution = '2K
     editId: result.json?.media?.workflowId || null,
     step: decodeStepOrdinal(result.json?.media?.workflowStepId),
   };
+}
+
+const MAX_RATE_LIMIT_RETRIES = 3;
+
+const RATIO_TO_ENUM = {
+  '1:1': 'IMAGE_ASPECT_RATIO_SQUARE',
+  '16:9': 'IMAGE_ASPECT_RATIO_LANDSCAPE',
+  '9:16': 'IMAGE_ASPECT_RATIO_PORTRAIT',
+  '4:3': 'IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE',
+  '3:4': 'IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR',
+};
+
+// Fallback only — the live registry in the project payload is preferred, and
+// these were read out of it rather than invented.
+const FALLBACK_MODEL_KEYS = {
+  'Nano Banana Pro': 'GEM_PIX_2',
+  'Nano Banana 2': 'NARWHAL',
+  'Nano Banana 2 Lite': 'HARBOR_SEAL',
+};
+
+export function resolveImageModelKey(cache, displayName) {
+  const want = (displayName || '').trim().toLowerCase();
+  const hit = (cache?.imageModels || []).find(
+    m => m.displayName.toLowerCase() === want || m.id.toLowerCase() === want
+  );
+  return hit?.key || FALLBACK_MODEL_KEYS[displayName] || null;
+}
+
+// One call covers both a fresh generation and a follow-up edit — Flow uses the
+// same endpoint for both. An edit is distinguished only by naming the workflow
+// it belongs to and attaching the image it starts from.
+//
+// Compared with driving the composer, this returns the new media id AND its
+// workflow id directly, so none of the DOM tile-matching guesswork applies: the
+// answer comes from the server rather than from watching a virtualized grid.
+export async function generateImages(page, {
+  projectId, prompt, modelKey, ratio, seed = null, count = 1,
+  workflowId = null, baseMediaId = null, referenceMediaIds = [], attempt = 0,
+} = {}) {
+  if (!projectId) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'projectId is required to generate.');
+  if (!prompt) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'prompt is required to generate.');
+  if (!modelKey) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'Could not resolve an image model key.');
+
+  // Newlines are meaningless to the API and the UI path strips them too (Enter
+  // submits in the composer), so both paths send the same single line.
+  const text = String(prompt).replace(/\s+/g, ' ').trim();
+
+  // The UI sends UNSPECIFIED on an edit, which is the likeliest cause of edits
+  // silently coming back reshaped. Send the real ratio when we know it.
+  const aspect = RATIO_TO_ENUM[ratio] || 'IMAGE_ASPECT_RATIO_UNSPECIFIED';
+
+  const imageInputs = [];
+  if (baseMediaId) imageInputs.push({ imageInputType: 'IMAGE_INPUT_TYPE_BASE_IMAGE', name: baseMediaId });
+  for (const id of referenceMediaIds) imageInputs.push({ imageInputType: 'IMAGE_INPUT_TYPE_REFERENCE', name: id });
+
+  const result = await page.evaluate(async (args) => {
+    if (!window.grecaptcha?.enterprise?.execute) {
+      return { ok: false, stage: 'recaptcha', error: 'grecaptcha.enterprise is not available on this page.' };
+    }
+    let token;
+    try {
+      token = await window.grecaptcha.enterprise.execute(args.siteKey, { action: args.action });
+    } catch (e) {
+      return { ok: false, stage: 'recaptcha', error: String(e) };
+    }
+    let accessToken;
+    try {
+      accessToken = (await (await fetch('/fx/api/auth/session')).json())?.access_token;
+    } catch (e) {
+      return { ok: false, stage: 'session', error: String(e) };
+    }
+    if (!accessToken) return { ok: false, stage: 'session', error: 'No access_token in the session response.' };
+
+    const clientContext = {
+      recaptchaContext: { token, applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB' },
+      projectId: args.projectId,
+      tool: 'PINHOLE',
+      ...(args.workflowId ? { workflowId: args.workflowId } : {}),
+      sessionId: ';' + Date.now(),
+    };
+    const one = {
+      clientContext,
+      imageModelName: args.modelKey,
+      imageAspectRatio: args.aspect,
+      structuredPrompt: { parts: [{ text: args.text }] },
+      imageInputs: args.imageInputs,
+      ...(args.seed !== null ? { seed: args.seed } : {}),
+    };
+
+    const res = await fetch(`https://aisandbox-pa.googleapis.com/v1/projects/${args.projectId}/flowMedia:batchGenerateImages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({
+        clientContext,
+        mediaGenerationContext: { batchId: crypto.randomUUID() },
+        useNewMedia: true,
+        requests: Array.from({ length: args.count }, () => one),
+      }),
+    });
+    const body = await res.text();
+    let json = null;
+    try { json = JSON.parse(body); } catch { /* keep raw for the error */ }
+    return { ok: res.ok, status: res.status, json, text: json ? null : body.slice(0, 500) };
+  }, {
+    siteKey: RECAPTCHA_SITE_KEY, action: RECAPTCHA_ACTION, projectId, workflowId,
+    modelKey, aspect, text, seed, count: Math.min(Math.max(count, 1), 4), imageInputs,
+  });
+
+  if (!result.ok) {
+    // 429 means Flow declined before doing any work — no credits were spent, so
+    // retrying cannot double-charge. Seen when several generations and upscales
+    // are fired in quick succession, which is exactly what this path enables.
+    if (result.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+      const waitMs = 5000 * Math.pow(2, attempt);
+      logger.warn('Flow rate-limited the generation, backing off', { attempt: attempt + 1, waitMs });
+      await page.waitForTimeout(waitMs);
+      return generateImages(page, {
+        projectId, prompt, modelKey, ratio, seed, count,
+        workflowId, baseMediaId, referenceMediaIds, attempt: attempt + 1,
+      });
+    }
+    if (result.status === 429) {
+      throw new FlowError(ErrorCodes.GOOGLE_LIMIT_REACHED,
+        `Flow rate-limited this generation after ${MAX_RATE_LIMIT_RETRIES + 1} attempts. ` +
+        'This is a rate limit, not a credit balance — check flow_status and retry in a minute.',
+        { status: 429 });
+    }
+    const reason = result.json?.error?.details?.[0]?.reason;
+    if (reason === 'PUBLIC_ERROR_UNUSUAL_ACTIVITY') {
+      throw new FlowError(ErrorCodes.GENERATION_BLOCKED,
+        'Flow rejected the generation\'s reCAPTCHA assessment (PUBLIC_ERROR_UNUSUAL_ACTIVITY). ' +
+        `The action name this build sends ("${RECAPTCHA_ACTION}") has most likely changed on Flow's side.`,
+        { stage: result.stage, status: result.status });
+    }
+    throw new FlowError(ErrorCodes.GENERATION_BLOCKED,
+      `Generation request failed${result.status ? ` (HTTP ${result.status})` : ''}: ` +
+      `${result.error || result.json?.error?.message || result.text || 'unknown error'}`,
+      { stage: result.stage, status: result.status });
+  }
+
+  const media = (result.json?.media || []).map(m => ({
+    mediaId: m.name,
+    editId: m.workflowId,
+    seed: m.image?.generatedImage?.seed ?? null,
+  })).filter(m => m.mediaId);
+
+  if (!media.length) {
+    throw new FlowError(ErrorCodes.GENERATION_BLOCKED, 'Generation returned 200 but no media in the response.');
+  }
+  logger.info('Generated via API', { count: media.length, modelKey, aspect, isEdit: !!workflowId });
+  return media;
 }

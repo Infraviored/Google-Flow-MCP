@@ -10,6 +10,8 @@ export const ErrorCodes = {
   // Flow declined to upscale, which is distinct from a download that broke —
   // the generation is intact and still fetchable at 1K.
   UPSCALE_FAILED: 'UPSCALE_FAILED',
+  // Flow refused to start a generation (reCAPTCHA assessment, quota, bad request).
+  GENERATION_BLOCKED: 'GENERATION_BLOCKED',
   MANUAL_VERIFICATION_REQUIRED: 'MANUAL_VERIFICATION_REQUIRED',
   GOOGLE_LIMIT_REACHED: 'GOOGLE_LIMIT_REACHED',
   UNKNOWN_UI_CHANGE: 'UNKNOWN_UI_CHANGE',
