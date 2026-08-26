@@ -16,8 +16,26 @@ import path from 'path';
 import { loadAllProjectCaches } from '../src/utils/media-index.js';
 import { downloadsPath } from '../src/utils/paths.js';
 
-const PROMPT_DIR = process.argv[2]
+const argv = process.argv.slice(2);
+const sinceArg = (argv.find(a => a.startsWith('--since=')) || '').split('=')[1] || null;
+const PROMPT_DIR = argv.find(a => !a.startsWith('--'))
   || '/home/schneider/repos_private/VibeVoice/website_react/ai_image_resources/00_prompts';
+
+// Every generation and every medium carries createTime from Flow, so "what did
+// we make since this morning" is a filter rather than a memory exercise.
+function parseSince(v) {
+  if (!v) return null;
+  const now = new Date();
+  if (v === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (v === 'yesterday') return new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const rel = v.match(/^(\d+)([hd])$/);
+  if (rel) return new Date(now - Number(rel[1]) * (rel[2] === 'h' ? 3600e3 : 86400e3));
+  const abs = Date.parse(v);
+  if (!Number.isNaN(abs)) return new Date(abs);
+  console.error(`Cannot read --since="${v}". Use today, yesterday, 6h, 2d, or a date.`);
+  process.exit(1);
+}
+const SINCE = parseSince(sinceArg);
 
 // Both paths collapse whitespace before sending, so compare on the same footing.
 const norm = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -85,6 +103,7 @@ for (const cache of caches) {
   const genTitle = new Map((cache.generations || []).map(g => [g.editId, g.title]));
   for (const m of cache.media || []) {
     if (!m.prompt) continue;                       // derived media carry none
+    if (SINCE && (!m.createdAt || new Date(m.createdAt) < SINCE)) continue;
     const stem = byKey.get(keyOf(m.prompt));
     const v = variantOf(m.prompt);
 
@@ -137,6 +156,7 @@ const rows = [...subjects.entries()]
   .sort((a, b) => a[0].localeCompare(b[0]));
 const missing = [...subjects.entries()].filter(([, s]) => !s.black.length && !s.white.length && !s.stale.length);
 
+if (SINCE) console.log(`only work created since ${SINCE.toISOString()}\n`);
 console.log(`prompt files: ${stems.length}   generations in cache: ${caches.reduce((n, c) => n + (c.generations?.length || 0), 0)}`);
 console.log(`matched to a current prompt file: ${rows.length}   swap-steps attributed: ${attributed}\n`);
 console.log('legend: 2K/1K = downloaded at that resolution   "!" = recorded but file is gone   gen = generated, never downloaded\n');
@@ -147,6 +167,10 @@ for (const [stem, s] of rows) {
   console.log(stem.padEnd(42) + fmt(s.black).padEnd(10) + fmt(s.white).padEnd(10) + note);
 }
 
+if (SINCE) {
+  console.log('\n(the "never generated" list is omitted — with a time filter it would only mean "not in this window")');
+  process.exit(0);
+}
 console.log(`\n--- prompt files with NO generation matching their current text (${missing.length}) ---`);
 console.log('Either never generated, or generated before the prompt was revised.');
 for (const [stem] of missing) console.log('  ' + stem);
