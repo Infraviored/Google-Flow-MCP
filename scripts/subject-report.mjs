@@ -13,13 +13,61 @@
 // The whole payload is read and reduced here; only the table is printed.
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { loadAllProjectCaches } from '../src/utils/media-index.js';
 import { downloadsPath } from '../src/utils/paths.js';
 
 const argv = process.argv.slice(2);
 const sinceArg = (argv.find(a => a.startsWith('--since=')) || '').split('=')[1] || null;
-const PROMPT_DIR = argv.find(a => !a.startsWith('--'))
-  || '/home/schneider/repos_private/VibeVoice/website_react/ai_image_resources/00_prompts';
+const RESOURCES = argv.find(a => !a.startsWith('--'))
+  || '/home/schneider/repos_private/VibeVoice/website_react/ai_image_resources';
+const PROMPT_DIR = path.join(RESOURCES, '00_prompts');
+
+// Flow's project endpoint keeps returning workflows that have been deleted from
+// the grid, so "what Flow has" and "what is in the grid" are not the same set.
+// Pass the ids that are gone; without them a deleted attempt still counts as a
+// picture we own.
+const goneFile = (argv.find(a => a.startsWith('--gone=')) || '').split('=')[1] || null;
+const GONE = new Set(goneFile && fs.existsSync(goneFile)
+  ? JSON.parse(fs.readFileSync(goneFile, 'utf-8'))
+  : []);
+
+// The remote listing is a network call; --nc-cache lets a repeat run reuse it.
+const REMOTE = 'claude-homeserver:Documents/VibeVoice/ai_image_resources';
+const ncCache = (argv.find(a => a.startsWith('--nc-cache=')) || '').split('=')[1] || null;
+function remoteMasters() {
+  if (argv.includes('--offline')) return null;
+  try {
+    if (ncCache && fs.existsSync(ncCache)) return new Set(JSON.parse(fs.readFileSync(ncCache, 'utf-8')));
+    const out = execFileSync('rclone', ['lsf', `${REMOTE}/02_transparent/`], { encoding: 'utf-8', timeout: 180000 });
+    const set = [...new Set(out.trim().split('\n').filter(Boolean).map(f => f.replace(/\.png$/, '')))];
+    if (ncCache) fs.writeFileSync(ncCache, JSON.stringify(set));
+    return new Set(set);
+  } catch (err) {
+    console.error(`Nextcloud unreachable (${err.message.split('\n')[0]}) — the remote column is left blank.`);
+    return null;
+  }
+}
+
+// index.json is the register the site builds from: a stem is served only if it
+// is recorded live there.
+function registry() {
+  const f = path.join(RESOURCES, 'index.json');
+  if (!fs.existsSync(f)) return { live: new Set(), draft: new Set(), regenerate: new Set(), needed: new Set() };
+  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  const live = new Set(d.live_without_a_variant || []);
+  const draft = new Set();
+  for (const s of Object.values(d.subjects || {})) {
+    if (s.live) live.add(s.live);
+    for (const x of s.drafts || []) draft.add(x);
+  }
+  const nameOf = (x) => (typeof x === 'string' ? x : x?.stem);
+  return {
+    live, draft,
+    regenerate: new Set((d.regenerate || []).map(nameOf).filter(Boolean)),
+    needed: new Set((d.needed || []).map(nameOf).filter(Boolean)),
+  };
+}
 
 // Every generation and every medium carries createTime from Flow, so "what did
 // we make since this morning" is a filter rather than a memory exercise.
@@ -103,6 +151,7 @@ for (const cache of caches) {
   const genTitle = new Map((cache.generations || []).map(g => [g.editId, g.title]));
   for (const m of cache.media || []) {
     if (!m.prompt) continue;                       // derived media carry none
+    if (GONE.has(m.editId)) continue;              // deleted from the grid
     if (SINCE && (!m.createdAt || new Date(m.createdAt) < SINCE)) continue;
     const stem = byKey.get(keyOf(m.prompt));
     const v = variantOf(m.prompt);
@@ -151,6 +200,15 @@ const fmt = (list) => {
   return res.size ? [...res].sort().join('/') : 'gen';
 };
 
+const MASTERS = remoteMasters();
+const REG = registry();
+const stateOf = (stem) =>
+  REG.regenerate.has(stem) ? 'REGENERATE'
+  : REG.live.has(stem) ? 'live'
+  : REG.draft.has(stem) ? 'draft'
+  : REG.needed.has(stem) ? 'needed'
+  : '—';
+
 const rows = [...subjects.entries()]
   .filter(([, s]) => s.black.length || s.white.length || s.stale.length)
   .sort((a, b) => a[0].localeCompare(b[0]));
@@ -159,13 +217,38 @@ const missing = [...subjects.entries()].filter(([, s]) => !s.black.length && !s.
 if (SINCE) console.log(`only work created since ${SINCE.toISOString()}\n`);
 console.log(`prompt files: ${stems.length}   generations in cache: ${caches.reduce((n, c) => n + (c.generations?.length || 0), 0)}`);
 console.log(`matched to a current prompt file: ${rows.length}   swap-steps attributed: ${attributed}\n`);
-console.log('legend: 2K/1K = downloaded at that resolution   "!" = recorded but file is gone   gen = generated, never downloaded\n');
-console.log('subject'.padEnd(42) + 'black'.padEnd(10) + 'white'.padEnd(10) + 'note');
-console.log('-'.repeat(80));
+console.log('legend: 2K/1K = downloaded at that resolution   "!" = recorded but file is gone   gen = generated, never downloaded');
+console.log('        master = alpha-extracted master on Nextcloud   state = what index.json records\n');
+console.log('subject'.padEnd(42) + 'black'.padEnd(9) + 'white'.padEnd(9) + 'master'.padEnd(8) + 'state');
+console.log('-'.repeat(84));
 for (const [stem, s] of rows) {
-  const note = s.stale.length ? `${s.stale.length} step(s) with no colour in the prompt` : '';
-  console.log(stem.padEnd(42) + fmt(s.black).padEnd(10) + fmt(s.white).padEnd(10) + note);
+  const bits = [];
+  if (s.stale.length) bits.push(`${s.stale.length} step(s) with no colour in the prompt`);
+  console.log(
+    stem.padEnd(42) + fmt(s.black).padEnd(9) + fmt(s.white).padEnd(9)
+    + (MASTERS === null ? '?' : MASTERS.has(stem) ? 'yes' : '—').padEnd(8)
+    + stateOf(stem) + (bits.length ? '   ' + bits.join('; ') : ''));
 }
+
+// ---- the three gaps ---------------------------------------------------------
+// Answering "what have we made that is not secured, and not shipped" needs both
+// remote and registry; each is reported separately so a missing one is visible
+// rather than silently turning a gap into a pass.
+const generated = rows.map(([stem]) => stem);
+if (MASTERS !== null) {
+  const noMaster = generated.filter(s => !MASTERS.has(s));
+  console.log(`\n--- generated, no master on Nextcloud (${noMaster.length}) ---`);
+  console.log('The only copies are the downloads on this disk. Extract the alpha and push.');
+  for (const s of noMaster) console.log(`  ${s}   ${fmt(subjects.get(s).black)}/${fmt(subjects.get(s).white)}`);
+
+  const masterNotLive = [...MASTERS].filter(s => !REG.live.has(s)).sort();
+  console.log(`\n--- master on Nextcloud, not recorded live (${masterNotLive.length}) ---`);
+  console.log('Secured and reviewable; the site does not ship them until index.json says live.');
+  for (const s of masterNotLive) console.log(`  ${s}${REG.draft.has(s) ? '   (draft — a later attempt won)' : ''}`);
+}
+const notLive = generated.filter(s => !REG.live.has(s) && !REG.draft.has(s));
+console.log(`\n--- generated, not live and not a known draft (${notLive.length}) ---`);
+for (const s of notLive) console.log(`  ${s}${MASTERS === null ? '' : MASTERS.has(s) ? '   master ready' : '   no master yet'}`);
 
 if (SINCE) {
   console.log('\n(the "never generated" list is omitted — with a time filter it would only mean "not in this window")');
