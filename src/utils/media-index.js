@@ -228,6 +228,43 @@ export function view(editId, { fullPrompts = false, step = null } = {}) {
   return out;
 }
 
+// Bulk import of a whole project, from Flow's own project endpoint rather than
+// from the DOM. One call replaces navigating to every generation in turn, and
+// it reaches generations this MCP never made — including ones from before it
+// existed. Merges, never replaces: a step already carrying downloads keeps them.
+export function importProjectContents({ projectId, generations, media }) {
+  return mutate((idx) => {
+    let gens = 0, steps = 0, titles = 0;
+    const byEdit = new Map();
+    for (const m of media) {
+      if (!m.editId || !m.mediaId) continue;
+      if (!byEdit.has(m.editId)) byEdit.set(m.editId, []);
+      byEdit.get(m.editId).push(m);
+    }
+    for (const g of generations) {
+      if (!g.editId) continue;
+      const gen = ensureGen(idx, g.editId);
+      assignKnown(gen, { projectId, title: g.title });
+      if (g.title) { gen.titleKey = normalizeTitle(g.title); titles++; }
+      if (g.createdAt) gen.createdAt = g.createdAt;
+      if (!gen.editUrl && projectId) {
+        gen.editUrl = `https://labs.google/fx/en/tools/flow/project/${projectId}/edit/${g.editId}`;
+      }
+      gens++;
+      for (const m of byEdit.get(g.editId) || []) {
+        let step = gen.steps.find((x) => x.mediaId === m.mediaId);
+        if (!step) {
+          step = { mediaId: m.mediaId, downloads: [], firstSeenAt: m.createdAt || new Date().toISOString(), source: 'project-api' };
+          gen.steps.push(step);
+          steps++;
+        }
+        assignKnown(step, { prompt: m.prompt });
+      }
+    }
+    return { generations: gens, steps, titles };
+  });
+}
+
 export function getGeneration(editId) {
   return load().generations[editId] || null;
 }

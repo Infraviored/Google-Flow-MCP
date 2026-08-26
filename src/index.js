@@ -222,6 +222,8 @@ const TOOL_DEFINITIONS = [
         format: { type: 'string', description: 'json (default), markdown for a clickable table, or compact for one line per step.', default: 'json' },
         refresh: { type: 'boolean', description: 'Re-read the live page first. Default true when a browser is connected.', default: true },
         orphans: { type: 'boolean', description: 'Instead list downloaded files the catalog cannot attribute to any generation.', default: false },
+        sync_project: { type: 'boolean', description: 'Import the whole open project from Flow in one request — every generation title and every full prompt, including work made outside this MCP. Run once per project, or after generating elsewhere.', default: false },
+        project_id: { type: 'string', description: 'Project to sync; defaults to the one currently open.' },
         limit: { type: 'number', description: 'How many generations to list when no target is given.', default: 20 },
       },
     },

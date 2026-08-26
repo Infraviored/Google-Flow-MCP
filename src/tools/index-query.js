@@ -1,9 +1,10 @@
 import { getPage, isBrowserConnected } from '../browser/connect.js';
 import { openAndSync } from './generation-context.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
+import { fetchProjectContents } from '../browser/flow-api.js';
 import {
   view, findByTitle, findByMediaId, listGenerationsIndexed,
-  listOrphanDownloads, renderMarkdown, indexLocation,
+  listOrphanDownloads, renderMarkdown, indexLocation, importProjectContents,
 } from '../utils/media-index.js';
 
 // One read surface over the catalog. Replaces flow_open_generation (navigate),
@@ -11,6 +12,28 @@ import {
 // asking the same question with different amounts of guesswork attached.
 export async function handleIndexQuery(args = {}) {
   const format = args.format || 'json';
+
+  // Bulk import straight from Flow's own project endpoint. One request carries
+  // every generation's title and every media item's full prompt — including
+  // work this MCP never made — so this is the cheap way to make the catalog
+  // complete rather than only knowing what passed through here.
+  if (args.sync_project) {
+    const page = getPage();
+    const projectId = args.project_id
+      || page.url().split('/project/')[1]?.split(/[/?#]/)[0];
+    if (!projectId) {
+      throw new FlowError(ErrorCodes.INVALID_PARAMS,
+        'No project in the current URL — pass project_id, or open a project first.');
+    }
+    const contents = await fetchProjectContents(page, projectId);
+    const counts = importProjectContents(contents);
+    return {
+      projectId,
+      fetched: { generations: contents.generations.length, media: contents.media.length },
+      imported: counts,
+      indexPath: indexLocation(),
+    };
+  }
 
   if (args.orphans) {
     const files = listOrphanDownloads();
