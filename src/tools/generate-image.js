@@ -10,7 +10,7 @@ import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
 import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds, verifyNewestTileIds } from '../browser/gallery.js';
-import { recordGeneration, recordStep, recordDownload } from '../utils/media-index.js';
+import { recordGeneration, recordDownload } from '../utils/media-index.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -375,12 +375,9 @@ export async function handleGenerateImage(args) {
     for (const [uuid, editId] of Object.entries(mediaIdToTileId)) {
       recordGeneration({
         editId,
-        projectId: projectIdForUrls,
-        editUrl: `https://labs.google/fx/en/tools/flow/project/${projectIdForUrls}/edit/${editId}`,
         model,
         ratio,
       });
-      recordStep({ editId, mediaId: uuid, prompt: args.prompt, source: 'generate' });
       const filePath = downloadedByUuid.get(uuid);
       if (filePath) {
         recordDownload({ editId, mediaId: uuid, path: filePath, resolution: '1K', method: 'generate-autosave' });

@@ -104,116 +104,11 @@ export async function getVisibleMediaIds(page) {
   });
 }
 
-// The edit page's title bar has an editable text input holding the generation's
-// human-readable name (e.g. "Document writing via voice orb") — confirmed live via
-// the rendered DOM. Used to name downloaded files after what they actually are,
-// instead of an opaque uuid, so a wrong-file mixup (see verifyNewestTileIds) is
-// visible at a glance in the filename itself rather than only discoverable by
-// opening the file. Only meaningful on an /edit/ page; returns null elsewhere.
-export async function getGenerationTitle(page) {
-  return page.evaluate(() => {
-    const input = document.querySelector('input[aria-label="Editable text"]');
-    return input ? input.value.trim() : null;
-  }).catch(() => null);
-}
-
-// The edit page's "history" side panel (open by default, toggled by the
-// "Hide history"/"Show history" button) lists every step of this generation's
-// edit chain: each step's own thumbnail <img src="...name={mediaId}"> (its own
-// individually fetchable media id, confirmed live still resolvable via
-// media.getMediaUrlRedirect even after later edits superseded it — this is the
-// real recovery path for the "flow_edit_generation destroys the pre-edit
-// version" problem, not just a naming convenience) and the exact prompt/
-// instruction text that produced it, next to a `button.reuse-prompt-button`
-// (a stable, non-hashed class — unlike everything else in this file, safe to
-// select directly). No screenshot needed to read any of this.
-// A closed panel yields zero steps, which is indistinguishable from "this
-// generation has no history" to every caller — the worst possible failure for
-// something whose whole job is recording what exists. Open it first.
-async function ensureHistoryPanelOpen(page) {
-  const count = await page.locator('[id^="history-step-"]').count().catch(() => 0);
-  if (count > 0) return true;
-  // Only ever the "Show" affordance — clicking "Hide history" here would
-  // actively close a panel that was already fine.
-  const toggle = page.locator('button:has-text("Show history"), [aria-label*="show history" i]').first();
-  if (!(await toggle.isVisible().catch(() => false))) return false;
-  await toggle.click().catch(() => {});
-  await page.waitForSelector('[id^="history-step-"]', { timeout: 3000 }).catch(() => {});
-  return (await page.locator('[id^="history-step-"]').count().catch(() => 0)) > 0;
-}
-
-export async function listHistorySteps(page) {
-  await ensureHistoryPanelOpen(page);
-
-  // The panel virtualizes like the main grid does, so a long edit chain is
-  // truncated to whatever happens to be mounted. Scroll it loop-until-dry,
-  // same approach listGenerations already uses on the gallery scroller.
-  let previous = -1;
-  for (let i = 0; i < 10; i++) {
-    const count = await page.locator('[id^="history-step-"]').count().catch(() => 0);
-    if (count === previous) break;
-    previous = count;
-    await page.evaluate(() => {
-      const first = document.querySelector('[id^="history-step-"]');
-      const scroller = first?.closest('[data-testid="virtuoso-scroller"]')
-        || first?.parentElement?.parentElement;
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
-    }).catch(() => {});
-    await page.waitForTimeout(400);
-  }
-
-  const steps = await page.evaluate(() => {
-    const nodes = Array.from(document.querySelectorAll('[id^="history-step-"]'));
-    return nodes.map((step, index) => {
-      const idMatch = step.id.match(/^history-step-fe_id_(.+)$/);
-      // The thumbnail's src is the authoritative media id, NOT the element's
-      // id suffix. The suffix is the data-tile-id namespace, which usually
-      // carries the same value but does not have to: caught live on a
-      // freshly-generated step whose suffix held a transient id that returned
-      // 404 from getMediaUrlRedirect while the img src resolved 200. The img
-      // src is self-validating — it is the URL the browser is already
-      // successfully rendering — so it wins, and the suffix is only a fallback
-      // for a step whose thumbnail has not mounted yet.
-      const img = step.querySelector('img[src*="getMediaUrlRedirect"]');
-      const mediaMatch = img && (img.src || '').match(/name=([a-f0-9-]+)/);
-      const reuseBtn = step.querySelector('.reuse-prompt-button');
-      const promptContainer = reuseBtn ? reuseBtn.closest('div')?.parentElement : null;
-      const promptText = promptContainer?.firstElementChild?.textContent?.trim() || null;
-      const fromId = idMatch ? idMatch[1] : null;
-      const fromImg = mediaMatch ? mediaMatch[1] : null;
-      return {
-        index,
-        tileId: fromId,
-        mediaId: fromImg || fromId,
-        // Signals a still-settling panel: the caller should treat this step as
-        // provisional rather than record it as fact.
-        mediaIdMismatch: !!(fromId && fromImg && fromId !== fromImg),
-        unmounted: !fromImg,
-        prompt: promptText,
-      };
-    });
-  }).catch(() => []);
-
-  // A step read before its thumbnail mounted carries an id we cannot trust —
-  // recording it invents a phantom step that no download will ever attach to,
-  // and whose id is not even fetchable. Drop those rather than store them.
-  const provisional = steps.filter(s => s.unmounted || s.mediaIdMismatch);
-  if (provisional.length) {
-    logger.warn('Dropping history steps read before their thumbnail settled', {
-      count: provisional.length,
-      of: steps.length,
-    });
-  }
-  return steps.filter(s => !s.unmounted && !s.mediaIdMismatch);
-}
-
 // Gallery grid tiles: [data-tile-id="fe_id_..."] wrapping an
 // <a href=".../edit/{id}">. Newest-first. The id is ALWAYS taken from the
 // <a href>, never from data-tile-id or the <img src> — confirmed live that
 // all three can be different values for the same tile at the same instant;
-// only the href's id is resolvable via navigation. Row caption title (class
-// sc-cb61226a-2) is only mounted on the first tile of a multi-output batch —
-// callers should backfill siblings from job history.
+// only the href's id is resolvable via navigation.
 export async function listGenerations(page, { limit = 20 } = {}) {
   const scrapeOnce = () => page.evaluate(() => {
     const tiles = Array.from(document.querySelectorAll('[data-tile-id]'));
@@ -227,11 +122,9 @@ export async function listGenerations(page, { limit = 20 } = {}) {
       const id = match[1];
       if (seen.has(id)) continue;
       seen.add(id);
-      const titleEl = t.querySelector('.sc-cb61226a-2');
       out.push({
         id,
         editUrl: href,
-        title: titleEl ? titleEl.textContent.trim() : null,
       });
     }
     return out;

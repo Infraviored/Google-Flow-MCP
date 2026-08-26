@@ -1,12 +1,11 @@
 import { getPage } from '../browser/connect.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
-import { navigateToGeneration, followUpEdit, getGenerationTitle } from '../browser/gallery.js';
+import { navigateToGeneration, followUpEdit } from '../browser/gallery.js';
 import { getPromptInput, fillPrompt } from '../browser/composer.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { get } from '../utils/config.js';
 import { resolveTextParam } from '../utils/file-manager.js';
-import { recordGeneration, recordStep } from '../utils/media-index.js';
 
 export async function handleEditGeneration(args = {}) {
   args.instruction = resolveTextParam(args.instruction, args.instruction_file, { paramName: 'instruction', fileParamName: 'instruction_file' });
@@ -51,16 +50,6 @@ export async function handleEditGeneration(args = {}) {
   const newMediaIds = await followUpEdit(page, args.instruction, {
     timeoutMs: get('generationTimeoutMs', 120000),
   });
-
-  const editId = page.url().split('/edit/')[1]?.split(/[/?#]/)[0];
-  const title = await getGenerationTitle(page).catch(() => null);
-  recordGeneration({ editId, editUrl: page.url(), title });
-  // The instruction IS the prompt for the step this edit just produced. Without
-  // recording it here there is no way to tell later which of a generation's
-  // steps is the black-background pass and which is the white one.
-  for (const mediaId of newMediaIds || []) {
-    recordStep({ editId, mediaId, prompt: args.instruction, source: 'edit' });
-  }
 
   return {
     status: 'success',
