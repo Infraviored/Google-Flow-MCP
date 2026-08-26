@@ -1,11 +1,12 @@
 import { getPage } from '../browser/connect.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
-import { navigateToGeneration, followUpEdit } from '../browser/gallery.js';
+import { navigateToGeneration, followUpEdit, getGenerationTitle } from '../browser/gallery.js';
 import { getPromptInput, fillPrompt } from '../browser/composer.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { get } from '../utils/config.js';
 import { resolveTextParam } from '../utils/file-manager.js';
+import { logEntry } from '../utils/session-log.js';
 
 export async function handleEditGeneration(args = {}) {
   args.instruction = resolveTextParam(args.instruction, args.instruction_file, { paramName: 'instruction', fileParamName: 'instruction_file' });
@@ -50,6 +51,10 @@ export async function handleEditGeneration(args = {}) {
   const newMediaIds = await followUpEdit(page, args.instruction, {
     timeoutMs: get('generationTimeoutMs', 120000),
   });
+
+  const editId = page.url().split('/edit/')[1]?.split(/[/?#]/)[0];
+  const title = await getGenerationTitle(page).catch(() => null);
+  logEntry({ editId, editUrl: page.url(), title });
 
   return {
     status: 'success',

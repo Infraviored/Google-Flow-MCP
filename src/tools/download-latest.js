@@ -4,6 +4,7 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { resolveDownloadPath } from '../utils/file-manager.js';
 import { navigateToGeneration, listGenerations, getGenerationTitle } from '../browser/gallery.js';
+import { logEntry } from '../utils/session-log.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -122,7 +123,10 @@ export async function handleDownloadLatest(args = {}) {
       }
 
       const editRouteId2k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || 'download';
-      const title2k = args.filename ? null : await getGenerationTitle(page);
+      // Always read the on-page title now — it's what feeds the session log's
+      // clickable table, independent of whether the caller also gave an
+      // explicit filename for the file on disk.
+      const title2k = await getGenerationTitle(page).catch(() => null);
       const titledName2k = title2k ? `${titleToFilenameBase(title2k, editRouteId2k.slice(0, 8))}${path.extname(completed.filePath)}` : null;
       const { fullPath } = resolveDownloadPath('image', {
         filename: args.filename,
@@ -135,6 +139,8 @@ export async function handleDownloadLatest(args = {}) {
       fs.copyFileSync(completed.filePath, fullPath);
       fs.unlinkSync(completed.filePath);
       const stat = fs.statSync(fullPath);
+
+      logEntry({ editId: editRouteId2k, editUrl: page.url(), title: title2k, filePath: fullPath, resolution: '2K' });
 
       logger.info('2K upscaled file saved via CDP download to project outputs', { fullPath, size: stat.size });
       return {
@@ -181,7 +187,7 @@ export async function handleDownloadLatest(args = {}) {
         const buffer = await response.body();
         const contentType = response.headers()['content-type'] || '';
         const ext = contentType === 'image/png' ? 'png' : 'jpg';
-        const title1k = args.filename ? null : await getGenerationTitle(page);
+        const title1k = await getGenerationTitle(page).catch(() => null);
         const titledName1k = title1k ? `${titleToFilenameBase(title1k, mediaId.substring(0, 8))}.${ext}` : null;
         const { fullPath } = resolveDownloadPath('image', {
           filename: args.filename,
@@ -190,6 +196,10 @@ export async function handleDownloadLatest(args = {}) {
           jobId: `latest_${mediaId.substring(0, 8)}`,
         });
         fs.writeFileSync(fullPath, buffer);
+
+        const editRouteId1k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || mediaId;
+        logEntry({ editId: editRouteId1k, editUrl: page.url(), title: title1k, filePath: fullPath, resolution: '1K' });
+
         logger.info('Downloaded image directly via mediaId API', { path: fullPath, size: buffer.length });
         return {
           status: 'success',

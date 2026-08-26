@@ -28,6 +28,7 @@ import { handleListGenerations } from './tools/list-generations.js';
 import { handleOpenGeneration } from './tools/open-generation.js';
 import { handleEditGeneration } from './tools/edit-generation.js';
 import { handleGenerationHistory } from './tools/generation-history.js';
+import { renderSessionLog, clearSessionLog } from './utils/session-log.js';
 import { getMostRecentProject } from './navigation/project-navigator.js';
 import { jobQueue } from './queue/job-queue.js';
 import { takeScreenshot } from './utils/screenshots.js';
@@ -304,6 +305,16 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    name: 'flow_session_log',
+    description: 'MANDATORY after any batch of image/video work (generate, edit, or download calls): call this and paste its `markdown` value verbatim as your reply to the user — do not re-type file paths or titles yourself, that wastes tokens and the table is already correct. Returns one markdown table row per generation touched this session (deduped by its edit id, so a generate + a later black/white edit + several 1K/2K downloads all collapse onto one row): the generation\'s own on-page title (read from the Flow header, e.g. "Two glass whales singing documents") as a clickable link to its Flow edit URL, and every file downloaded for it so far as clickable local file:// links (each labeled with its resolution — so a black-pass and white-pass download of the same generation both show up side by side in one cell). Requires a terminal that renders file:// links as clickable (iTerm2/Kitty/WezTerm do; some do not).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clear: { type: 'boolean', description: 'Clear the log after rendering (start a fresh table for the next batch). Default false — the log keeps accumulating across calls for the life of the MCP connection.', default: false },
+      },
+    },
+  },
 ];
 
 async function handleToolCall(name, args) {
@@ -505,6 +516,12 @@ async function handleToolCall(name, args) {
     case 'flow_generation_history': {
       const result = await handleGenerationHistory(args);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_session_log': {
+      const markdown = renderSessionLog();
+      if (args?.clear) clearSessionLog();
+      return { content: [{ type: 'text', text: JSON.stringify({ markdown }, null, 2) }] };
     }
 
     default:

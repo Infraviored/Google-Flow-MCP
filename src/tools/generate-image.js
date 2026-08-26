@@ -10,6 +10,7 @@ import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
 import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds, verifyNewestTileIds } from '../browser/gallery.js';
+import { logEntry } from '../utils/session-log.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -326,6 +327,7 @@ export async function handleGenerateImage(args) {
     // Note: 2K/4K upscaled downloads require UI interaction and reCAPTCHA, out of scope for direct API.
     logger.info('Downloading generated images', { count: generatedImageUuids.length });
     const downloadedFiles = [];
+    const downloadedByUuid = new Map();
 
     for (const uuid of generatedImageUuids) {
       try {
@@ -342,6 +344,7 @@ export async function handleGenerateImage(args) {
             const destPath = path.join(outputDir, `flow_${uuid.substring(0, 8)}_${job.id}${ext}`);
             fs.writeFileSync(destPath, buffer);
             downloadedFiles.push(destPath);
+            downloadedByUuid.set(uuid, destPath);
             logger.info('Image downloaded', { uuid, size: buffer.length, path: destPath });
           }
         }
@@ -363,6 +366,22 @@ export async function handleGenerateImage(args) {
     const editIds = Object.values(mediaIdToTileId);
     const projectIdForUrls = page.url().split('/project/')[1]?.split(/[/?#]/)[0];
     const editUrls = editIds.map(id => `https://labs.google/fx/en/tools/flow/project/${projectIdForUrls}/edit/${id}`);
+
+    // Seed the session log now (no title yet — reading it here would mean
+    // navigating to each /edit/ page, which we're not on). A later
+    // flow_download_latest call on the same editId backfills the title and
+    // adds its own (often higher-res) file to this same row.
+    for (const [uuid, editId] of Object.entries(mediaIdToTileId)) {
+      const filePath = downloadedByUuid.get(uuid);
+      if (filePath) {
+        logEntry({
+          editId,
+          editUrl: `https://labs.google/fx/en/tools/flow/project/${projectIdForUrls}/edit/${editId}`,
+          filePath,
+          resolution: '1K',
+        });
+      }
+    }
 
     // Confirmed live: waitForNewMedia's "wasn't in the baseline" signal can misfire
     // against the virtualized gallery grid, returning real editIds for OLD, unrelated
