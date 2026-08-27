@@ -9,6 +9,7 @@ import { resolveTextParam } from '../utils/file-manager.js';
 import { logger } from '../utils/logger.js';
 import { generateImages, resolveImageModelKey, fetchProjectContents } from '../browser/flow-api.js';
 import { loadProjectCache, saveProjectCache } from '../utils/media-index.js';
+import { recoverFromCrash } from '../browser/launch-profile.js';
 
 // The API wants a ratio name; the cache only knows pixel dimensions. Snap to the
 // nearest supported ratio rather than sending UNSPECIFIED, which lets the edit
@@ -93,6 +94,20 @@ export async function handleEditGeneration(args = {}) {
           ratio,
         });
         newMediaIds = media.map(m => m.mediaId);
+
+        // Same fetch()-from-page-context gap as the generate path: this edit
+        // just changed the generation on Flow's servers without the browser's
+        // own DOM/React state knowing. The page is already sitting on this
+        // exact /edit/ URL, so a reload (not a navigation elsewhere) is what
+        // brings it in sync. Best-effort — a failed reload must not fail an
+        // edit that already succeeded and is already downloadable.
+        try {
+          await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+          await page.waitForTimeout(1000);
+          await recoverFromCrash(page);
+        } catch (reloadErr) {
+          logger.warn('Could not reload the live page after the API edit (non-fatal)', { error: reloadErr.message });
+        }
       }
     } catch (err) {
       logger.warn('API edit failed, falling back to the composer', { error: err.message });

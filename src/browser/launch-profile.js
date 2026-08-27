@@ -97,6 +97,18 @@ export async function recoverFromCrash(page) {
   }
 }
 
+// Distinct from recoverFromCrash's transient client-side exception: this is
+// Flow's own "you can't open this" error boundary (seen live when a project
+// is opened under a Google account that isn't the owner/a collaborator —
+// e.g. switching flow_connect to a second account still points at the first
+// account's project id). Reloading does not fix it, so it is reported rather
+// than retried.
+export async function checkProjectAccessError(page) {
+  const hasError = await page.locator('text=Something went wrong').first().isVisible().catch(() => false);
+  if (!hasError) return false;
+  return await page.locator('text=Back to projects').first().isVisible().catch(() => false);
+}
+
 export async function navigateToFlow(page, toolPage, projectId) {
   const targetUrl = projectId
     ? `https://labs.google/fx/en/tools/flow/project/${projectId}`
@@ -115,6 +127,15 @@ export async function navigateToFlow(page, toolPage, projectId) {
   if (currentUrl.includes('accounts.google.com')) {
     return { authenticated: false, url: currentUrl,
       message: 'OAuth blocked — Google detects automation. Use Chrome direct+CDP launch method.' };
+  }
+
+  if (projectId && await checkProjectAccessError(page)) {
+    logger.warn('Flow project failed to load (access error, not a transient crash)', { projectId });
+    return { authenticated: true, url: currentUrl, projectAccessError: true,
+      message: `The signed-in account cannot open project ${projectId} — either it does not exist under this `
+        + 'account or this account has no access to it (not the owner, not a collaborator). Reloading will not fix '
+        + 'this. Either connect with the account that owns the project, or open/create a project this account '
+        + 'actually has access to.' };
   }
 
   return { authenticated: true, url: currentUrl };

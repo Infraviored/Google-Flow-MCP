@@ -119,6 +119,52 @@ export function mediaDownloadUrl(mediaId) {
   return `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=${mediaId}`;
 }
 
+const WORKFLOW_ENDPOINT = 'https://aisandbox-pa.googleapis.com/v1/flowWorkflows';
+
+// Sets the title Flow shows for a generation (its `workflow.metadata.displayName`)
+// — the same field the editable text field at the top of a generation's /edit/
+// page writes to. Measured live by wrapping fetch while typing into that field:
+// a plain PATCH, no reCAPTCHA involved (unlike generate/upscale, this mutates
+// nothing billable). Used to default a generation's Flow-side title to the
+// stem name of the prompt file that made it, so `flow_index({title: ...})`
+// can find it by the name this project actually calls it, not Flow's own
+// auto-generated guess.
+export async function renameWorkflow(page, { editId, projectId, title } = {}) {
+  if (!editId) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'editId is required to rename a generation.');
+  if (!projectId) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'projectId is required to rename a generation.');
+  if (!title) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'title is required to rename a generation.');
+
+  const result = await page.evaluate(async (args) => {
+    let accessToken;
+    try {
+      accessToken = (await (await fetch('/fx/api/auth/session')).json())?.access_token;
+    } catch (e) {
+      return { ok: false, stage: 'session', error: String(e) };
+    }
+    if (!accessToken) return { ok: false, stage: 'session', error: 'No access_token in the session response.' };
+
+    const res = await fetch(`${args.endpoint}/${args.editId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({
+        workflow: { name: args.editId, projectId: args.projectId, metadata: { displayName: args.title } },
+        updateMask: 'metadata.displayName',
+      }),
+    });
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* keep the raw text for the error */ }
+    return { ok: res.ok, status: res.status, json, text: json ? null : text.slice(0, 500) };
+  }, { endpoint: WORKFLOW_ENDPOINT, editId, projectId, title });
+
+  if (!result.ok) {
+    throw new FlowError(ErrorCodes.GENERATION_BLOCKED,
+      `Renaming the generation failed${result.status ? ` (HTTP ${result.status})` : ''}: ` +
+      `${result.json?.error?.message || result.text || 'unknown error'}`,
+      { status: result.status });
+  }
+}
+
 // Triggers Flow's own upscale and returns the new medium, which is then
 // fetchable by id like any other. Proven end to end: returns 200 and yields a
 // real 2048x2048 image, with no download button, no 60-second poll and no CDP

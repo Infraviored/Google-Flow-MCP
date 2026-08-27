@@ -23,6 +23,7 @@ import { handleChangeSettings } from './tools/change-settings.js';
 import { handleListGenerations } from './tools/list-generations.js';
 import { handleEditGeneration } from './tools/edit-generation.js';
 import { handleIndexQuery } from './tools/index-query.js';
+import { handleRenameGeneration } from './tools/rename-generation.js';
 import { getMostRecentProject } from './navigation/project-navigator.js';
 import { jobQueue } from './queue/job-queue.js';
 import { takeScreenshot } from './utils/screenshots.js';
@@ -208,6 +209,33 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'flow_rename_generation',
+    description: 'Sets the title Flow shows for a generation (its metadata.displayName — the same field the editable text field at the top of a generation\'s /edit/ page writes to). A plain metadata PATCH, no credits spent. flow_generate_image already does this automatically when called with prompt_file; use this tool directly to rename an older generation, one made outside this MCP, or several at once via renames.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'The new title. Required unless renames is given.' },
+        id: { type: 'string', description: 'Generation to rename. Optional if already on its edit page.' },
+        url: { type: 'string', description: 'Edit URL instead of an id.' },
+        project_id: { type: 'string', description: 'Project id from flow_list_projects. Resolved from id/url/current page when omitted; used as the default for every entry in renames too.' },
+        renames: {
+          type: 'array',
+          description: 'Rename several generations in one call instead of the single id/title/url/project_id above. Each entry can omit project_id to fall back to the top-level one. One entry failing does not stop the rest — check each result\'s status.',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'The new title for this generation.' },
+              id: { type: 'string', description: 'Generation to rename.' },
+              url: { type: 'string', description: 'Edit URL instead of an id.' },
+              project_id: { type: 'string', description: 'Overrides the top-level project_id for this entry.' },
+            },
+            required: ['title'],
+          },
+        },
+      },
+    },
+  },
+  {
     name: 'flow_index',
     description: 'What do we already have? Answers it from a persistent catalog, refreshed from the live page when a browser is connected. Given a generation (by id, url, title, or media_id) returns each step of its edit history: the prompt behind it, a black/white variant hint, and every local file already downloaded for it with its resolution and whether that file still exists. With no arguments, lists known generations. Prompts come truncated unless full_prompts is set.',
     inputSchema: {
@@ -247,6 +275,7 @@ async function handleToolCall(name, args) {
       if (result.browser) setBrowser(result.browser);
       const page = getPage();
       let oauthRequired = false;
+      let navResult = null;
       if (args?.open_flow !== false) {
         // Default to the most recently used known project instead of the bare
         // Flow landing page when the caller didn't ask for a specific project —
@@ -254,7 +283,7 @@ async function handleToolCall(name, args) {
         // connect (no cached project yet); every later connect already knows
         // where it's going, so it should go straight there.
         const effectiveProjectId = args?.project_id || getMostRecentProject()?.id;
-        const navResult = await navigateToFlow(page, undefined, effectiveProjectId);
+        navResult = await navigateToFlow(page, undefined, effectiveProjectId);
         if (navResult && navResult.authenticated === false) {
           oauthRequired = true;
         }
@@ -265,6 +294,21 @@ async function handleToolCall(name, args) {
         accountCheck = await checkAccount({ expectedAccount: profileEntry?.expectedAccount, enforceExpected: true });
       } catch (e) {
         accountCheck = { verified: false, error: e.message };
+      }
+      // navResult.projectAccessError means Flow's app shell loaded fine (so
+      // accountCheck above can genuinely verify) but the specific project
+      // failed to open under this account — a real failure, not a connect
+      // success, so it must not fall through to the 'connected' response
+      // below just because the account itself checked out.
+      if (navResult?.projectAccessError) {
+        return { content: [{ type: 'text', text: JSON.stringify({
+          status: 'project_not_accessible',
+          profile: profileKey,
+          account: accountCheck?.account || 'verified-account',
+          url,
+          message: navResult.message,
+          accountVerified: accountCheck,
+        }, null, 2) }] };
       }
       // Self-registration: config's `profiles` map is the single source of
       // truth for every known account — write this profile into it once its
@@ -386,6 +430,11 @@ async function handleToolCall(name, args) {
 
     case 'flow_edit_generation': {
       const result = await handleEditGeneration(args);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_rename_generation': {
+      const result = await handleRenameGeneration(args);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
 

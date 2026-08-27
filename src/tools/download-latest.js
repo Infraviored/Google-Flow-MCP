@@ -72,14 +72,20 @@ export async function handleDownloadLatest(args = {}) {
       args?.project_id ||
       getMostRecentProject()?.id;
 
-    let cache = projectId ? loadProjectCache(projectId) : null;
-    if (!cache && projectId && page) {
-      try {
-        cache = await fetchProjectContents(page, projectId);
-        saveProjectCache(cache);
-      } catch {
-        /* proceed if project fetch fails */
-      }
+    // A 2K request has to know about derived media (upscales) that may have
+    // been created moments ago by a flow_edit_generation call on THIS editId —
+    // the on-disk cache from loadProjectCache() only reflects the project as
+    // of its last fetch. Confirmed live: editing a generation to swap its
+    // background, then requesting 2K with no media_id, served the PRIOR
+    // step's upscale straight out of the stale cache via the derived[0]
+    // fallback below — same bytes, wrong colour, reported as success. A 2K
+    // download is rare enough that the ~1.6s live fetch is worth paying every
+    // time rather than risking that silent staleness.
+    let cache = projectId && page ? await fetchProjectContents(page, projectId).catch(() => null) : null;
+    if (cache) {
+      saveProjectCache(cache);
+    } else if (projectId) {
+      cache = loadProjectCache(projectId);
     }
 
     const gen = (cache?.generations || []).find((g) => g.editId === editId);

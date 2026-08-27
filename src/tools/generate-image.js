@@ -6,12 +6,12 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { prepareDownload, saveMetadata, resolveTextParam } from '../utils/file-manager.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { get } from '../utils/config.js';
-import { getActiveExpectedAccount } from '../browser/launch-profile.js';
+import { getActiveExpectedAccount, recoverFromCrash } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
 import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds, verifyNewestTileIds } from '../browser/gallery.js';
 import { recordGeneration, recordDownload, loadProjectCache, saveProjectCache } from '../utils/media-index.js';
-import { generateImages, resolveImageModelKey, fetchProjectContents, mediaDownloadUrl } from '../browser/flow-api.js';
+import { generateImages, resolveImageModelKey, fetchProjectContents, mediaDownloadUrl, renameWorkflow } from '../browser/flow-api.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -44,6 +44,48 @@ function selectRatio(requested) {
 }
 
 let lastAppliedImageSettings = null;
+
+// Flow's own auto-titles ("Glass microphone writing code il…") are useless
+// for finding a generation back by the name this project actually calls
+// it — flow_index({title}) can only match what Flow calls the thing. When
+// the caller used prompt_file (the normal case here — every prompt lives in
+// its own file named after its stem, e.g. for_word_2_16x9.txt), default the
+// Flow-side title to that stem so the two names line up. Best-effort and
+// silent on failure: a title is cosmetic, never worth failing a generation
+// that already spent credits over.
+// The API-direct generate path never touches the browser's DOM/React state —
+// it is a plain fetch() from the page context, so the live page keeps showing
+// whatever it had on screen before the call. Confirmed as an actual usability
+// problem, not just cosmetic: a human watching the browser alongside this
+// tool sees nothing change until they reload it themselves. Navigating to the
+// new generation's own /edit/ page afterward is what the old composer-click
+// path did implicitly by virtue of being driven through the real UI; this
+// restores that without going back to it. Best-effort: a failed nav here
+// must never fail a generation that already succeeded and was already
+// downloaded.
+async function syncPageToNewGeneration(page, editUrl) {
+  if (!editUrl) return;
+  try {
+    await page.goto(editUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(1000);
+    await recoverFromCrash(page);
+  } catch (err) {
+    logger.warn('Could not navigate the live page to the new generation (non-fatal)', { editUrl, error: err.message });
+  }
+}
+
+async function applyDefaultTitle(page, media, projectId, args) {
+  if (!args.prompt_file) return;
+  const stem = path.basename(args.prompt_file).replace(/\.[^.]+$/, '');
+  for (let i = 0; i < media.length; i++) {
+    const title = media.length > 1 ? `${stem}_${i + 1}` : stem;
+    try {
+      await renameWorkflow(page, { editId: media[i].editId, projectId, title });
+    } catch (err) {
+      logger.warn('Could not set the Flow-side title for a generation (non-fatal)', { editId: media[i].editId, title, error: err.message });
+    }
+  }
+}
 
 // Download what the API just produced and record it. Kept separate from the
 // composer path so neither has to carry the other's assumptions.
@@ -144,23 +186,69 @@ export async function handleGenerateImage(args) {
     // it — simply does not arise. The composer path below stays as a fallback.
     const projectIdApi = page.url().split('/project/')[1]?.split(/[/?#]/)[0] || null;
     if (projectIdApi && modelEarly && ratioEarly && autoConfirm) {
+      let beforeEditIds = null;
       try {
         let cache = loadProjectCache(projectIdApi);
         if (!cache) { cache = await fetchProjectContents(page, projectIdApi); saveProjectCache(cache); }
         const modelKey = resolveImageModelKey(cache, modelEarly);
         if (modelKey) {
+          // Snapshotted right before the call, not from the (possibly stale)
+          // cache load above, so a recovery diff below only ever sees workflows
+          // that are genuinely new since THIS attempt.
+          beforeEditIds = new Set(cache.generations.map(g => g.editId));
           const media = await generateImages(page, {
             projectId: projectIdApi, prompt: args.prompt, modelKey, ratio: ratioEarly, count: quantityEarly,
           });
+          await applyDefaultTitle(page, media, projectIdApi, args);
           const apiResult = await finishApiGeneration({
             page, job, media, model: modelEarly, ratio: ratioEarly, quantity: quantityEarly, args, outputDir: outputDirEarly, projectId: projectIdApi,
           });
+          await syncPageToNewGeneration(page, apiResult.editUrls?.[0]);
           jobQueue.completeJob(job.id, apiResult);
           return jobQueue.getJob(job.id).result;
         }
         logger.warn('No model key for this model, using the composer', { model: modelEarly });
       } catch (err) {
-        logger.warn('API generation failed, falling back to the composer', { error: err.message });
+        // The POST that creates the generation can succeed on Flow's servers
+        // while the local page.evaluate() promise that was waiting on it still
+        // rejects — e.g. "Execution context was destroyed", a CDP hiccup, a
+        // timeout after the response was already in flight. Confirmed live: a
+        // generation whose call errored this way still showed up, fully
+        // rendered, once the page was reloaded and the project re-fetched. A
+        // stale execution context does not clear itself, so reload before
+        // re-reading — without it this recovery check would see the exact
+        // same stale state and never find the new workflow.
+        //
+        // Falling through to the composer without this check double-generates
+        // (and double-charges): the "failed" call already spent the credit.
+        logger.warn('API generation call errored — reloading to check whether it actually succeeded before falling back to the composer', { error: err.message });
+        if (beforeEditIds) {
+          try {
+            await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+            await page.waitForTimeout(1500);
+            const fresh = await fetchProjectContents(page, projectIdApi);
+            saveProjectCache(fresh);
+            const newGen = fresh.generations.find(g => !beforeEditIds.has(g.editId));
+            if (newGen) {
+              const media = fresh.media
+                .filter(m => m.editId === newGen.editId && m.step === 1)
+                .map(m => ({ mediaId: m.mediaId, editId: m.editId, seed: m.seed }));
+              if (media.length) {
+                logger.info('API generation had actually succeeded — recovered after reload', { editId: newGen.editId });
+                await applyDefaultTitle(page, media, projectIdApi, args);
+                const apiResult = await finishApiGeneration({
+                  page, job, media, model: modelEarly, ratio: ratioEarly, quantity: quantityEarly, args, outputDir: outputDirEarly, projectId: projectIdApi,
+                });
+                await syncPageToNewGeneration(page, apiResult.editUrls?.[0]);
+                jobQueue.completeJob(job.id, apiResult);
+                return jobQueue.getJob(job.id).result;
+              }
+            }
+            logger.warn('Reload found no new generation — the API call genuinely failed, falling back to the composer');
+          } catch (recoveryErr) {
+            logger.warn('Reload-recovery check itself failed, falling back to the composer', { error: recoveryErr.message });
+          }
+        }
       }
     }
 
