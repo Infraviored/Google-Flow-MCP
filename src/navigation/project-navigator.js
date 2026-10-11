@@ -7,6 +7,8 @@ import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { recoverFromCrash } from '../browser/launch-profile.js';
 import { projectsPath } from '../utils/paths.js';
 import { readJson, writeJsonAtomic, withFileLock } from '../utils/atomic-json.js';
+import { listProjectsApi, projectIdFromUrl } from '../browser/flow-api.js';
+import { dismissPopups, humanClick } from '../browser/safe-actions.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -34,110 +36,16 @@ export function getMostRecentProject() {
 }
 
 /**
- * List existing projects visible on the Flow homepage by scanning project cards.
- * Returns array of { name, url, fullText }.
+ * List the account's projects through Flow's own API (UpteDb, see rpc.js).
+ * The home page grid is no longer worth scraping: it carries no stable ids
+ * or titles since the move to flow.google.com.
+ * Returns array of { id, name, url, thumbnail_url, createdAt }.
  */
 export async function listExistingProjects(page) {
-  const flowUrl = get('flowUrl', 'https://labs.google/fx/en/tools/flow');
-
-  // Navigate to the main Flow page if we're not there, or if we're INSIDE a project.
-  // Match on the path, not the configured URL: project hrefs carry no locale segment.
-  const currentUrl = page.url();
-  const onHome = /\/fx\/(?:[a-z]{2}\/)?tools\/flow\/?(?:[?#]|$)/.test(currentUrl);
-  if (!onHome || currentUrl.includes('/project/')) {
-    await page.goto(flowUrl, { waitUntil: 'networkidle', timeout: 30000 });
-    await recoverFromCrash(page);
+  if (!page.url().startsWith('https://flow.google.com/')) {
+    await page.goto(get('flowUrl', 'https://flow.google.com'), { waitUntil: 'load', timeout: 30000 });
   }
-
-  // Wait for the first cards to mount.
-  await page.locator('a[href*="/project/"]').first()
-    .waitFor({ state: 'attached', timeout: 20000 })
-    .catch(() => { });
-
-  logger.info('Scanning for existing projects...');
-
-  // Flow VIRTUALIZES the project grid: cards scrolled out of view are unmounted,
-  // so a single snapshot only ever sees the visible slice. The page also scrolls
-  // inside a nested overflow container, not the window, so window.scrollTo is a
-  // no-op here. Scroll that container step by step and accumulate across steps.
-  //
-  // Project cards are anchored on a[href*="/project/"]. The card's styled-components
-  // class hashes change on every Flow deploy, so nothing here matches on class names.
-  // The project title is a bare text node inside the span that also holds the edit
-  // button — reading innerText would swallow the "edit"/"Edit project" button labels.
-  // The <i class="google-symbols">edit</i> ligature stays "edit" in every UI language.
-  const projects = await page.evaluate(async () => {
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-    // The scroll container is the nearest ancestor that actually overflows.
-    const findScroller = () => {
-      const link = document.querySelector('a[href*="/project/"]');
-      let el = link?.parentElement;
-      for (let i = 0; i < 10 && el; i++) {
-        const cs = getComputedStyle(el);
-        if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 20) return el;
-        el = el.parentElement;
-      }
-      return document.scrollingElement || document.documentElement;
-    };
-
-    const seen = new Set();
-    const result = [];
-
-    const harvest = () => {
-    for (const link of document.querySelectorAll('a[href*="/project/"]')) {
-      const href = link.getAttribute('href') || '';
-      const id = href.split('/project/')[1]?.split(/[/?#]/)[0];
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-
-      // Walk up until we reach the element that also contains this card's edit button.
-      let card = link.parentElement;
-      let editBtn = null;
-      for (let depth = 0; depth < 6 && card; depth++) {
-        editBtn = [...card.querySelectorAll('i.google-symbols')]
-          .find(i => i.textContent.trim() === 'edit');
-        if (editBtn) break;
-        card = card.parentElement;
-      }
-
-      // Title = direct text nodes of the element wrapping the edit button.
-      let name = null;
-      const titleHost = editBtn?.closest('span');
-      if (titleHost) {
-        name = [...titleHost.childNodes]
-          .filter(n => n.nodeType === Node.TEXT_NODE)
-          .map(n => n.textContent)
-          .join('')
-          .trim() || null;
-      }
-
-      const img = card?.querySelector('img')?.getAttribute('src') || null;
-
-      result.push({
-        id,
-        name: name || 'Untitled project',
-        url: href.startsWith('http') ? href : `https://labs.google${href}`,
-        thumbnail_url: img && !img.startsWith('http') ? `https://labs.google${img}` : img,
-      });
-    }
-    };
-
-    const scroller = findScroller();
-    harvest();
-    let lastTop = -1;
-    for (let step = 0; step < 40; step++) {
-      const top = scroller.scrollTop;
-      if (top === lastTop) break; // reached bottom
-      lastTop = top;
-      scroller.scrollTop = top + scroller.clientHeight * 0.8;
-      await sleep(400);
-      harvest();
-    }
-
-    return result;
-  });
-
+  const projects = await listProjectsApi(page);
   logger.info('Existing projects found', { count: projects.length });
   return projects;
 }
@@ -148,12 +56,12 @@ export async function listExistingProjects(page) {
  * Returns { url, id, name }.
  */
 export async function createNewProject(page, name) {
-  const flowUrl = get('flowUrl', 'https://labs.google/fx/en/tools/flow');
+  const flowUrl = get('flowUrl', 'https://flow.google.com');
 
   // Ensure we're on the main Flow page (not inside a project)
   const currentUrl = page.url();
   if (!currentUrl.includes(flowUrl) || currentUrl.includes('/project/')) {
-    await page.goto(flowUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(flowUrl, { waitUntil: 'load', timeout: 30000 });
     await page.waitForTimeout(2000);
     await recoverFromCrash(page);
   }
@@ -192,91 +100,34 @@ export async function createNewProject(page, name) {
     }
   }
 
-  await page.waitForTimeout(4000);
+  await page.waitForURL(/\/project\//, { timeout: 20000 }).catch(() => {});
+  await page.waitForLoadState('load', { timeout: 20000 }).catch(() => {});
+  await dismissPopups(page);
 
-  const projectUrl = page.url();
-  logger.info('New project created', { url: projectUrl });
-
-  // If Flow asked for a project name, fill it
-  const nameInputSelectors = [
-    'input[placeholder*="name" i]',
-    'input[placeholder*="title" i]',
-    '[contenteditable="true"]',
-  ];
-
-  let named = false;
-  for (const sel of nameInputSelectors) {
-    try {
-      const input = page.locator(sel).first();
-      if (await input.isVisible().catch(() => false)) {
-        const projectName = name ||
-          `Project ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
-        await input.click();
-        await input.fill(projectName);
-        await page.waitForTimeout(500);
-
-        // Confirm / submit
-        const confirmSelectors = [
-          'button:has-text("Create")',
-          'button:has-text("Confirm")',
-          'button:has-text("OK")',
-          '[type="submit"]',
-        ];
-        for (const cs of confirmSelectors) {
-          try {
-            const confirmBtn = page.locator(cs).first();
-            if (await confirmBtn.isVisible().catch(() => false)) {
-              await confirmBtn.click();
-              await page.waitForTimeout(2500);
-              break;
-            }
-          } catch { /* continue */ }
-        }
-        named = true;
-        break;
-      }
-    } catch { /* continue */ }
-  }
-
-  let finalUrl = page.url();
-
-  // If we're not inside a project (no /project/ in URL), click the project card
+  const finalUrl = page.url();
   if (!finalUrl.includes('/project/')) {
-    logger.info('Not inside project page, clicking project card to enter...');
-    await page.waitForTimeout(2000);
+    await takeScreenshot(page, 'no-project-after-new');
+    throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE, `Clicked "New project" but landed on ${finalUrl}`);
+  }
+  logger.info('New project created', { url: finalUrl });
 
-    // Find all project links, click the newest (first in DOM order)
-    const cardClicked = await page.evaluate(() => {
-      const links = document.querySelectorAll('a[href*="/project/"]');
-      if (links.length > 0) {
-        const link = links[0]; // newest project = first in order
-        const href = link.getAttribute('href');
-        if (href) {
-          window.location.href = href.startsWith('http') ? href : 'https://labs.google' + href;
-          return true;
-        }
-      }
-      return false;
-    });
-
-    if (cardClicked) {
-      await page.waitForTimeout(3000);
-      finalUrl = page.url();
-      logger.info('Navigated into project', { url: finalUrl });
-    } else {
-      // Fallback: try clicking via Playwright
-      const projectLink = page.locator('a[href*="/project/"]').first();
-      if (await projectLink.isVisible().catch(() => false)) {
-        await projectLink.click();
-        await page.waitForTimeout(3000);
-        finalUrl = page.url();
-        logger.info('Navigated into project via click', { url: finalUrl });
-      } else {
-        await takeScreenshot(page, 'no-project-links');
-        throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
-          'Could not find project card to navigate into. ' +
-          'The project was created but no card link was found.');
-      }
+  // The project title is an inline text input in the top bar ("Editable text").
+  // Never fall back to [contenteditable]: that is the prompt composer.
+  if (name) {
+    const title = page.locator('input[aria-label="Editable text"]').first();
+    await title.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await dismissPopups(page);
+    if (await title.isVisible().catch(() => false)) {
+      await title.click();
+      await title.fill(name);
+      await title.press('Enter');
+      await page.waitForTimeout(1500);
+    }
+    const id = projectIdFromUrl(finalUrl);
+    const saved = (await listProjectsApi(page).catch(() => [])).find(p => p.id === id);
+    if (saved?.name !== name) {
+      throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
+        `Project ${id} was created but could not be named "${name}" (Flow shows "${saved?.name}").`);
     }
   }
 
@@ -318,9 +169,10 @@ export async function ensureProjectInContext(page, context = {}) {
 
   const enterProject = async (project) => {
     logger.info('Entering project', { id: project.id, name: project.name });
-    await page.goto(project.url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(project.url, { waitUntil: 'load', timeout: 30000 });
     await page.waitForTimeout(2000);
     await recoverFromCrash(page);
+    await dismissPopups(page);
     return { url: project.url, id: project.id, name: project.name, reused: true };
   };
 
@@ -390,7 +242,7 @@ export async function ensureProjectInContext(page, context = {}) {
         logger.info('Found matching project from history', {
           campaign: context.campaign, name: match.name, url: match.url,
         });
-        await page.goto(match.url, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.goto(match.url, { waitUntil: 'load', timeout: 30000 });
         await page.waitForTimeout(2000);
         await recoverFromCrash(page);
         match.last_used = new Date().toISOString();
@@ -415,47 +267,24 @@ export async function ensureProjectInContext(page, context = {}) {
  * sections: "Characters", "Scenes", "Tools", "Trash"
  * Returns true if navigation succeeded, false otherwise.
  */
+// Project sidebar (flow.google.com): plain text entries "All media", "Images",
+// "Characters", "Scenes", "Tools", "Trash". Characters and Tools change the
+// route (/character, /tools); Scenes and Images only filter the gallery.
 export async function navigateToSidebar(page, section) {
   logger.info('Navigating to sidebar section', { section });
-
-  const selectors = [
-    `[class*="sidebar"] button:has-text("${section}")`,
-    `[class*="sidebar"] a:has-text("${section}")`,
-    `nav button:has-text("${section}")`,
-    `nav a:has-text("${section}")`,
-    `[class*="nav"] button:has-text("${section}")`,
-    `[class*="nav"] a:has-text("${section}")`,
-    `button:has-text("${section}")`,
-    `a:has-text("${section}")`,
-  ];
-
-  for (const selector of selectors) {
-    try {
-      const el = page.locator(selector).first();
-      if (await el.isVisible().catch(() => false)) {
-        await el.click();
-        await page.waitForTimeout(1500);
-        logger.info('Sidebar navigation done', { section, selector });
-        return true;
-      }
-    } catch { /* try next */ }
+  const entry = page.getByText(section, { exact: true }).first();
+  if (!(await entry.isVisible().catch(() => false))) {
+    await takeScreenshot(page, `sidebar-${section}-not-found`);
+    logger.warn('Sidebar section not found', { section, url: page.url() });
+    return false;
   }
-
-  // Fallback: detect all buttons and log them
-  logger.warn('Sidebar section not found via selectors', { section });
-  const elements = await detectPageElements(page);
-  await takeScreenshot(page, `sidebar-${section}-not-found`);
-  logger.info('Available buttons on page', {
-    buttons: elements.buttons.map(b => b.text).filter(Boolean),
-  });
-
-  return false;
+  await humanClick(page, entry);
+  await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(1000);
+  logger.info('Sidebar navigation done', { section, url: page.url() });
+  return true;
 }
 
-/**
- * Get the current page elements and detect the active sidebar section.
- * Returns the section that appears to be active, or null.
- */
 export async function getActiveSidebarSection(page) {
   try {
     const section = await page.evaluate(() => {

@@ -3,7 +3,10 @@ import { logger } from '../utils/logger.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { resolveDownloadPath } from '../utils/file-manager.js';
-import { navigateToGeneration, listGenerations, getGenerationTitle, getMainPreviewMediaId, readUpscaleToast } from '../browser/gallery.js';
+import { navigateToGeneration, readUpscaleToast } from '../browser/gallery.js';
+import { fetchProjectContents, projectIdFromUrl, getMediaUrl } from '../browser/flow-api.js';
+import { humanClick } from '../browser/safe-actions.js';
+import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { recordGeneration, recordDownload } from '../utils/media-index.js';
 import fs from 'fs';
 import path from 'path';
@@ -36,11 +39,24 @@ export async function handleDownloadLatest(args = {}) {
     );
   }
 
-  // Optional explicit target generation — navigate there first; both the 1K and
-  // 2K paths below then simply operate on "whatever's on screen now", same as
-  // their existing default (no id) behavior.
-  if (args?.id) {
-    await navigateToGeneration(page, { id: args.id });
+  if (args.project_id || args.project_name || args.campaign) {
+    await ensureProjectInContext(page, { project_id: args.project_id, name: args.project_name, campaign: args.campaign });
+  }
+
+  // Which generation: explicit id > the /edit/ page on screen > the newest in
+  // the project. Resolved through Flow's API — the DOM carries no ids.
+  const projectId = projectIdFromUrl(page.url());
+  if (!projectId) {
+    throw new FlowError(ErrorCodes.INVALID_PARAMS, 'Not inside a project — open one with flow_connect{project_id} or another tool first.');
+  }
+  const contents = await fetchProjectContents(page, projectId);
+  const onScreenId = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || null;
+  const newest = [...contents.generations].sort((x, y) => (y.createdAt || '').localeCompare(x.createdAt || ''))[0];
+  const target = args.media_id
+    ? contents.generations.find(g => g.editId === contents.media.find(m => m.mediaId === args.media_id)?.editId)
+    : contents.generations.find(g => g.editId === (args.id || onScreenId)) || (!args.id ? newest : null);
+  if (!target) {
+    throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, `Generation ${args.id || args.media_id || ''} not found in project ${projectId}.`);
   }
 
   if (resolution === '2K') {
@@ -65,13 +81,8 @@ export async function handleDownloadLatest(args = {}) {
       // generation's /edit/{mediaId} page, not on the gallery grid — navigate there
       // first if we're not already on one. Grid is newest-first (confirmed live),
       // so "latest" is the first tile from listGenerations.
-      if (!/\/edit\//.test(page.url())) {
-        const [latest] = await listGenerations(page, { limit: 1 });
-        if (!latest) {
-          throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-            'Could not find a gallery tile link to the latest generation.');
-        }
-        await navigateToGeneration(page, { id: latest.id });
+      if (!page.url().includes(`/edit/${target.editId}`)) {
+        await navigateToGeneration(page, { id: target.editId });
       }
 
       // The edit page can still be rendering the full-size image (and its
@@ -89,7 +100,7 @@ export async function handleDownloadLatest(args = {}) {
         throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, 'Download button not visible on page for 2K upscale');
       }
 
-      await downloadBtnLocator.click();
+      await humanClick(page, downloadBtnLocator);
       await page.waitForTimeout(500);
 
       const menu2kOption = page.locator('button, [role="menuitem"], [role="option"]').filter({ hasText: /2K/ }).first();
@@ -125,9 +136,9 @@ export async function handleDownloadLatest(args = {}) {
       // Capture the media id BEFORE the upscale runs. Afterwards the caller has
       // no way to say which history step this file belongs to, which is why 2K
       // downloads could never be attributed to a step in the index.
-      const mediaId2k = await getMainPreviewMediaId(page);
+      const mediaId2k = target.primaryMediaId;
 
-      await menu2kOption.click();
+      await humanClick(page, menu2kOption);
       logger.info('Clicked 2K upscale download option, waiting for CDP download-completed event');
 
       const deadline = Date.now() + 60000;
@@ -159,7 +170,7 @@ export async function handleDownloadLatest(args = {}) {
       // Always read the on-page title now — it's what feeds the session log's
       // clickable table, independent of whether the caller also gave an
       // explicit filename for the file on disk.
-      const title2k = await getGenerationTitle(page).catch(() => null);
+      const title2k = target.title;
       const titledName2k = title2k ? `${titleToFilenameBase(title2k, editRouteId2k.slice(0, 8))}${path.extname(completed.filePath)}` : null;
       const { fullPath } = resolveDownloadPath('image', {
         filename: args.filename,
@@ -192,67 +203,42 @@ export async function handleDownloadLatest(args = {}) {
     }
   }
 
-  // Default: 1K direct-API path (completely untouched)
-  logger.info('Attempting to download latest result (1K direct API)');
+  // Default: 1K — the stored image itself, via a signed URL from Flow's API.
+  const mediaId = args.media_id || target.primaryMediaId;
+  logger.info('Downloading 1K via Flow API', { editId: target.editId, mediaId });
   try {
-    // The /edit/{id} URL's id is the edit-route id, NOT the img's own
-    // fetchable media id — confirmed live these are different id namespaces
-    // even on the exact same tile/page. Fetching media.getMediaUrlRedirect
-    // with the edit-route id silently fails. Always resolve the media id from
-    // the actual <img> on the page, never from the URL — unless the caller
-    // gave one explicitly (recovering a specific superseded history step;
-    // confirmed live this endpoint still resolves those, see flow_generation_history).
-    const mediaId = args.media_id || await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      for (const img of imgs) {
-        const src = img.src || '';
-        const m = src.match(/media\.getMediaUrlRedirect\?name=([a-f0-9-]+)/);
-        if (m && img.width > 100) return m[1];
-      }
-      return null;
-    }).catch(() => null);
-
-    if (mediaId) {
-      logger.info('Found mediaId for direct fetch', { mediaId });
-
-      const downloadUrl = `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=${mediaId}`;
-      const response = await page.request.get(downloadUrl, { timeout: 15000 });
-
-      if (response && response.ok()) {
-        const buffer = await response.body();
-        const contentType = response.headers()['content-type'] || '';
-        const ext = contentType === 'image/png' ? 'png' : 'jpg';
-        const title1k = await getGenerationTitle(page).catch(() => null);
-        const titledName1k = title1k ? `${titleToFilenameBase(title1k, mediaId.substring(0, 8))}.${ext}` : null;
-        const { fullPath } = resolveDownloadPath('image', {
-          filename: args.filename,
-          suggestedFilename: titledName1k || `latest_${mediaId.substring(0, 8)}.${ext}`,
-          model: 'download',
-          jobId: `latest_${mediaId.substring(0, 8)}`,
-        });
-        fs.writeFileSync(fullPath, buffer);
-
-        const editRouteId1k = page.url().split('/edit/')[1]?.split(/[/?#]/)[0] || mediaId;
-        recordGeneration({ editId: editRouteId1k, editUrl: page.url(), title: title1k });
-        recordDownload({ editId: editRouteId1k, mediaId, path: fullPath,
-                         resolution: '1K', bytes: buffer.length, method: 'direct-api' });
-
-        logger.info('Downloaded image directly via mediaId API', { path: fullPath, size: buffer.length });
-        return {
-          status: 'success',
-          method: 'direct-api',
-          resolution: '1K',
-          mediaId,
-          filePath: fullPath,
-          size: buffer.length,
-          hint: REPORT_AND_OFFER_TO_OPEN_HINT,
-        };
-      }
+    const url = await getMediaUrl(page, mediaId);
+    const response = await page.request.get(url, { timeout: 120000 });
+    if (!response.ok()) {
+      throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, `Download of ${mediaId} failed: HTTP ${response.status()}`);
     }
+    const buffer = await response.body();
+    const contentType = response.headers()['content-type'] || '';
+    const ext = contentType.includes('png') ? 'png' : contentType.startsWith('video/') ? 'mp4' : 'jpg';
+    const titledName1k = target.title ? `${titleToFilenameBase(target.title, mediaId.substring(0, 8))}.${ext}` : null;
+    const { fullPath } = resolveDownloadPath(ext === 'mp4' ? 'video' : 'image', {
+      filename: args.filename,
+      suggestedFilename: titledName1k || `latest_${mediaId.substring(0, 8)}.${ext}`,
+      model: 'download',
+      jobId: `latest_${mediaId.substring(0, 8)}`,
+    });
+    fs.writeFileSync(fullPath, buffer);
 
-    await takeScreenshot(page, 'no-media-id-found');
-    throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-      'Could not find a fetchable media id in the page\'s images to download at 1K.');
+    const editUrl = `https://flow.google.com/project/${projectId}/edit/${target.editId}`;
+    recordGeneration({ editId: target.editId, projectId, editUrl, title: target.title });
+    recordDownload({ editId: target.editId, mediaId, path: fullPath, resolution: '1K', bytes: buffer.length, method: 'direct-api' });
+
+    return {
+      status: 'success',
+      method: 'direct-api',
+      resolution: '1K',
+      id: target.editId,
+      title: target.title,
+      mediaId,
+      filePath: fullPath,
+      size: buffer.length,
+      hint: REPORT_AND_OFFER_TO_OPEN_HINT,
+    };
   } catch (err) {
     if (err instanceof FlowError) throw err;
     throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, `Download failed: ${err.message}`);

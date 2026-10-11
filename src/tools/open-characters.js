@@ -6,9 +6,9 @@ import { saveMetadata } from '../utils/file-manager.js';
 
 export async function handleOpenCharacters() {
   const page = getPage();
-  const baseUrl = 'https://labs.google/fx/tools/flow';
+  const baseUrl = 'https://flow.google.com';
 
-  await page.goto(baseUrl + '/characters', { waitUntil: 'networkidle', timeout: 30000 });
+  await page.goto(baseUrl + '/characters', { waitUntil: 'load', timeout: 30000 });
   await page.waitForTimeout(2000);
 
   const elements = await detectPageElements();

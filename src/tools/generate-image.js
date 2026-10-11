@@ -9,16 +9,20 @@ import { get } from '../utils/config.js';
 import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 import { applySettings, closeSidebar, ensureAgentOff } from '../browser/agent-settings.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from '../browser/composer.js';
-import { waitForNewMedia, getVisibleMediaIds, waitForStableTileIds, verifyNewestTileIds } from '../browser/gallery.js';
+import { humanClick } from '../browser/safe-actions.js';
+import { projectIdFromUrl, mediaIdsOfProject, waitForNewProjectMedia, downloadMedia } from '../browser/flow-api.js';
 import { recordGeneration, recordStep, recordDownload } from '../utils/media-index.js';
 import fs from 'fs';
 import path from 'path';
 
 const IMAGE_MODEL_MAP = {
   'Nano Banana Pro': 'nano_banana_pro',
-  'Nano Banana 2': 'narwhal_display',
+  'Nano Banana 2.1': 'beluga_display',
   'Nano Banana 2 Lite': 'harbor_seal',
 };
+
+// Flow replaced Nano Banana 2 with 2.1 (Oct 2026); keep the old name working.
+const IMAGE_MODEL_ALIASES = { 'Nano Banana 2': 'Nano Banana 2.1' };
 
 const IMAGE_RATIO_MAP = {
   '16:9': 'IMAGE_ASPECT_RATIO_LANDSCAPE',
@@ -30,8 +34,9 @@ const IMAGE_RATIO_MAP = {
 
 function selectModel(requested) {
   if (!requested || requested === 'auto') {
-    return 'Nano Banana 2';
+    return 'Nano Banana 2.1';
   }
+  if (IMAGE_MODEL_ALIASES[requested]) return IMAGE_MODEL_ALIASES[requested];
   if (IMAGE_MODEL_MAP[requested]) return requested;
   return null;
 }
@@ -42,7 +47,6 @@ function selectRatio(requested) {
   return null;
 }
 
-let lastAppliedImageSettings = null;
 
 export async function handleGenerateImage(args) {
   args.prompt = resolveTextParam(args.prompt, args.prompt_file, { paramName: 'prompt', fileParamName: 'prompt_file' });
@@ -84,7 +88,7 @@ export async function handleGenerateImage(args) {
     if (preGenUrl.includes('/edit/')) {
       const projectRootUrl = preGenUrl.split('/edit/')[0];
       logger.info('On a generation edit page — navigating back to project root for fresh composer', { from: preGenUrl, to: projectRootUrl });
-      await page.goto(projectRootUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(projectRootUrl, { waitUntil: 'load', timeout: 30000 });
       await page.waitForTimeout(1500);
     }
 
@@ -129,52 +133,23 @@ export async function handleGenerateImage(args) {
 
     // STEP 3.5: Apply model, ratio, and quantity via Agent Settings UI panel
     const quantity = Math.min(Math.max(args.quantity || 1, 1), 4);
-    const settingsChanged = !lastAppliedImageSettings ||
-      lastAppliedImageSettings.model !== model ||
-      lastAppliedImageSettings.ratio !== ratio ||
-      lastAppliedImageSettings.quantity !== quantity;
+    // Always apply: the settings popover is shared with video, and a cached
+    // "already set" could leave it in Video mode — a paid video instead of an image.
+    logger.info('Applying image settings', { model, ratio, quantity });
+    await applySettings(page, { model, ratio, quantity, mode: 'image' });
 
-    if (settingsChanged) {
-      logger.info('Applying image settings via Agent Settings UI panel', { model, ratio, quantity });
-      const applied = await applySettings(page, { model, ratio, quantity });
-      lastAppliedImageSettings = {
-        model: applied.model || model,
-        ratio: applied.ratio || ratio,
-        quantity: applied.quantity || quantity,
-      };
-      logger.info('Agent settings updated via UI', lastAppliedImageSettings);
+    // STEP 4: Hard check that the composer is in image mode. The closed trigger
+    // reads "🍌 <image model> …" in image mode and "Video · 720p · 8s …" in video
+    // mode — anything but an image model name means: do not click.
+    const triggerText = (await page.getByRole('button', { name: 'Settings trigger', exact: true })
+      .innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+    if (!Object.keys(IMAGE_MODEL_MAP).some(m => triggerText.includes(m)) || /video/i.test(triggerText)) {
+      await takeScreenshot(page, 'not-image-mode');
+      throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
+        `SAFETY BLOCK: composer is not in image mode (settings show "${triggerText}"). ` +
+        'Refusing to generate to avoid spending video credits.');
     }
-
-    // STEP 4: Verify the model selector confirms IMAGE mode (NOT video)
-    // Flow's bottom toolbar is always present in a project with a model selector.
-    // No "Image/Video" mode tabs exist — the generation mode is determined by
-    // which model is selected (e.g. "Nano Banana 2" = image, "Omni Flash" = video).
-    const modelFromUI = await page.evaluate(() => {
-      const modelBtn = Array.from(document.querySelectorAll('button'))
-        .find(b => {
-          const text = b.textContent || '';
-          return (text.includes('Nano') || text.includes('Banana') ||
-                  text.includes('Omni') || text.includes('Veo') ||
-                  text.includes('Imagen')) && b.offsetParent !== null;
-        });
-      return modelBtn ? modelBtn.textContent.trim().replace(/\s+/g, ' ').substring(0, 80) : null;
-    }).catch(() => null);
-
-    if (modelFromUI) {
-      logger.info('Model selector shows:', { modelFromUI });
-      const videoModelNames = ['Omni Flash', 'Veo', 'Omni'];
-      const isVideoModel = videoModelNames.some(v => modelFromUI.includes(v));
-      if (isVideoModel) {
-        await takeScreenshot(page, 'video-model-detected');
-        throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
-          `SAFETY BLOCK: the UI model "${modelFromUI}" is a VIDEO model. ` +
-          `Refusing to generate to avoid spending paid video credits. ` +
-          `Use flow_generate_video for videos.`);
-      }
-      logger.info('✅ Model selector confirms image mode');
-    } else {
-      logger.warn('Could not read model selector — assuming image mode from config');
-    }
+    logger.info('Composer confirmed in image mode', { triggerText });
 
     // Also verify the generate button exists (confirms the toolbar is active)
     const hasGenerateBtn = await page.locator(
@@ -245,172 +220,74 @@ export async function handleGenerateImage(args) {
       }
     }
 
-    // Baseline: the gallery already contains images from prior generations. Without this,
-    // the post-generate poll below would match those historic images on its very first
-    // check (before the new ones have even started rendering) and treat generation as
-    // instantly "done".
-    const baselineImageUuids = await getVisibleMediaIds(page);
+    // Baseline from Flow's own project listing: the gallery DOM carries no ids
+    // since flow.google.com, so "what is new" is decided against the API.
+    const projectId = projectIdFromUrl(page.url());
+    const baselineMedia = await mediaIdsOfProject(page, projectId);
 
     // STEP 10: Click generate — CREDITS WILL BE SPENT
     logger.info('Clicking Generate — credits will be spent');
-    await generateBtnLocator.click();
+    await humanClick(page, generateBtnLocator);
 
-    // STEP 11: Handle two possible generation flows:
-    //   A) Agent-mediated: Agent asks "Accepter?" before generating (when switching modes)
-    //   B) Direct: generation starts immediately (most common)
-    // Try Agent first (short wait), fall through to direct if not detected
-
-    let flowMode = 'direct';
-    logger.info('Checking for Agent confirmation dialog (5s window)...');
-    const acceptTimeoutMs = get('agentResponseTimeoutMs', 5000);
-    const acceptStart = Date.now();
-
-    while (Date.now() - acceptStart < acceptTimeoutMs) {
-      const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
-      if (pageText.includes('Accepter') || pageText.includes('Approve')) {
-        logger.info('Agent confirmation dialog detected — switching to Agent flow');
-        const acceptBtn = page.locator('button').filter({ hasText: /Accepter|Approve/ }).first();
-        await acceptBtn.click();
-        logger.info('Generation confirmed via Agent');
-        flowMode = 'agent';
-        break;
-      }
-      await page.waitForTimeout(500);
-    }
-
-    logger.info('Generation flow', { mode: flowMode });
-
-    // STEP 12: Wait for images to appear in the DOM (shared poll — see gallery.js)
+    // STEP 11: Wait for the new images to be listed by the project.
     logger.info('Waiting for generated images...');
-    const generatedImageUuids = await waitForNewMedia(page, baselineImageUuids, {
-      timeoutMs: get('generationTimeoutMs', 120000),
+    const fresh = await waitForNewProjectMedia(page, projectId, baselineMedia, {
+      expected: quantity, kind: 'image', timeoutMs: get('generationTimeoutMs', 180000),
     });
-
-    if (generatedImageUuids.length === 0) {
+    if (fresh.length === 0) {
       await takeScreenshot(page, 'no-images-detected');
       throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-        'Generation completed but no images were detected in the DOM. ' +
-        'Check the Flow project content library.');
+        'No new image appeared in the project after Generate. It may have been blocked by a safety filter; ' +
+        'check the project in Flow.');
     }
+    const generatedImageUuids = fresh.map(m => m.mediaId);
 
-    // Confirmed live: the same ratio param, same model, same project can silently come
-    // out at the wrong aspect ratio on one call and not another — the API response even
-    // echoes back the REQUESTED ratio regardless of what actually rendered, so trusting
-    // it is not an option. Check the actual rendered pixel dimensions instead (same
-    // signal followUpEdit's ratio-drift retry already relies on for the edit path).
-    const actualDims = await page.evaluate((uuids) => {
-      const out = {};
-      const imgs = Array.from(document.querySelectorAll('img'));
-      for (const uuid of uuids) {
-        const img = imgs.find(i => (i.src || '').includes(`name=${uuid}`) && i.naturalWidth > 0);
-        if (img) out[uuid] = { width: img.naturalWidth, height: img.naturalHeight };
-      }
-      return out;
-    }, generatedImageUuids).catch(() => ({}));
-
+    // Flow can silently render a different aspect ratio than requested; the API
+    // reports the real pixel size, so compare against that.
     const [reqW, reqH] = ratio.split(':').map(Number);
     const requestedAspect = reqW && reqH ? reqW / reqH : null;
     const ratioMismatches = [];
-    if (requestedAspect) {
-      for (const [uuid, dims] of Object.entries(actualDims)) {
-        const actualAspect = dims.width / dims.height;
-        if (Math.abs(actualAspect - requestedAspect) / requestedAspect > 0.03) {
-          ratioMismatches.push({ uuid, requested: ratio, actual: `${dims.width}x${dims.height}` });
-        }
+    for (const m of fresh) {
+      if (!requestedAspect || !m.dimensions) continue;
+      const actualAspect = m.dimensions.width / m.dimensions.height;
+      if (Math.abs(actualAspect - requestedAspect) / requestedAspect > 0.03) {
+        ratioMismatches.push({ uuid: m.mediaId, requested: ratio, actual: `${m.dimensions.width}x${m.dimensions.height}` });
       }
     }
     if (ratioMismatches.length > 0) {
       logger.warn('Generated image(s) do not match the requested aspect ratio', { ratioMismatches });
     }
 
-    // STEP 13: Download generated images via authenticated session (using APIRequestContext to avoid page navigation)
-    // Note: 2K/4K upscaled downloads require UI interaction and reCAPTCHA, out of scope for direct API.
-    logger.info('Downloading generated images', { count: generatedImageUuids.length });
+    // STEP 12: Download each new image at its stored size via a signed URL.
     const downloadedFiles = [];
-    const downloadedByUuid = new Map();
-
-    for (const uuid of generatedImageUuids) {
+    for (const m of fresh) {
       try {
-        const response = await page.request.get(
-          `https://labs.google/fx/api/trpc/media.getMediaUrlRedirect?name=${uuid}`,
-          { timeout: 15000 }
-        );
-
-        if (response && response.ok()) {
-          const contentType = response.headers()['content-type'] || '';
-          if (contentType.startsWith('image/')) {
-            const buffer = await response.body();
-            const ext = contentType === 'image/png' ? '.png' : '.jpg';
-            const destPath = path.join(outputDir, `flow_${uuid.substring(0, 8)}_${job.id}${ext}`);
-            fs.writeFileSync(destPath, buffer);
-            downloadedFiles.push(destPath);
-            downloadedByUuid.set(uuid, destPath);
-            logger.info('Image downloaded', { uuid, size: buffer.length, path: destPath });
-          }
-        }
+        const { path: filePath } = await downloadMedia(page, m.mediaId,
+          path.join(outputDir, `flow_${m.mediaId.substring(0, 8)}_${job.id}`));
+        downloadedFiles.push(filePath);
+        m.file = filePath;
       } catch (err) {
-        logger.warn('Failed to download image', { uuid, error: err.message });
+        logger.warn('Failed to download image', { uuid: m.mediaId, error: err.message });
       }
     }
-
     if (downloadedFiles.length === 0) {
       await takeScreenshot(page, 'download-failed');
-      throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-        'Failed to download any generated images via the authenticated session');
+      throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, 'Generated images were listed but none could be downloaded.');
     }
 
-    // The img-src id used above for direct download is NOT the same id as the
-    // gallery tile's /edit/{id} route (confirmed live) — map to the edit-route
-    // ids too so callers can jump straight to flow_open_generation/list backfill.
-    const mediaIdToTileId = await waitForStableTileIds(page, generatedImageUuids).catch(() => ({}));
-    const editIds = Object.values(mediaIdToTileId);
-    const projectIdForUrls = page.url().split('/project/')[1]?.split(/[/?#]/)[0];
-    const editUrls = editIds.map(id => `https://labs.google/fx/en/tools/flow/project/${projectIdForUrls}/edit/${id}`);
-
-    // Seed the index now. No title yet — reading one would mean navigating to
-    // each /edit/ page, which we are not on; a later download or open backfills
-    // it without erasing what we do know. The uuid here IS the step's media id
-    // and the prompt is right in scope, so this is the one place the
-    // prompt-to-media link can be recorded for free.
-    for (const [uuid, editId] of Object.entries(mediaIdToTileId)) {
+    const editIds = [...new Set(fresh.map(m => m.editId))];
+    const editUrls = editIds.map(id => `https://flow.google.com/project/${projectId}/edit/${id}`);
+    for (const m of fresh) {
       recordGeneration({
-        editId,
-        projectId: projectIdForUrls,
-        editUrl: `https://labs.google/fx/en/tools/flow/project/${projectIdForUrls}/edit/${editId}`,
+        editId: m.editId,
+        projectId,
+        editUrl: `https://flow.google.com/project/${projectId}/edit/${m.editId}`,
+        title: m.title,
         model,
         ratio,
       });
-      recordStep({ editId, mediaId: uuid, prompt: args.prompt, source: 'generate' });
-      const filePath = downloadedByUuid.get(uuid);
-      if (filePath) {
-        recordDownload({ editId, mediaId: uuid, path: filePath, resolution: '1K', method: 'generate-autosave' });
-      }
-    }
-
-    // Confirmed live: waitForNewMedia's "wasn't in the baseline" signal can misfire
-    // against the virtualized gallery grid, returning real editIds for OLD, unrelated
-    // generations instead of the tile this call actually created — see gallery.js's
-    // verifyNewestTileIds for the mechanism. If NONE of the returned editIds trace back
-    // to the newest gallery entries, this result is a known failure mode, not a
-    // borderline case — fail loud instead of shipping wrong files under the right prompt.
-    let idVerification = null;
-    if (editIds.length > 0) {
-      idVerification = await verifyNewestTileIds(page, editIds).catch(() => null);
-      if (idVerification && !idVerification.allVerified && idVerification.verifiedIds.length === 0) {
-        await takeScreenshot(page, 'editid-mismatch');
-        throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-          'Generation returned editIds that do not correspond to any of the newest gallery entries — ' +
-          'the downloaded files are very likely OLD, unrelated generations misattributed to this call, ' +
-          'not the images this prompt just produced. Do not trust or use downloadedFiles/editIds from ' +
-          'this result. Retry the call, or use flow_list_generations to find the real newest entry.',
-          { requestedPrompt: args.prompt, unverifiedEditIds: idVerification.unverifiedIds, downloadedFiles });
-      }
-      if (idVerification && !idVerification.allVerified) {
-        logger.warn('Some returned editIds did not verify against the newest gallery entries', {
-          verifiedIds: idVerification.verifiedIds,
-          unverifiedIds: idVerification.unverifiedIds,
-        });
-      }
+      recordStep({ editId: m.editId, mediaId: m.mediaId, prompt: args.prompt, source: 'generate' });
+      if (m.file) recordDownload({ editId: m.editId, mediaId: m.mediaId, path: m.file, resolution: '1K', method: 'generate-autosave' });
     }
 
     saveMetadata(job.id, {

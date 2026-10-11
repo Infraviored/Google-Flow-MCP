@@ -17,7 +17,7 @@ import { verifyAccount } from './account-check.js';
 // network. Once signed in the profile directory keeps the session, and every
 // later flow_connect runs without a screen.
 
-const FLOW_URL = get('flowUrl', 'https://labs.google/fx/en/tools/flow');
+const FLOW_URL = get('flowUrl', 'https://flow.google.com');
 // A continue= pointing at labs.google is rejected with a 400, so sign in plainly
 // and open Flow ourselves once the account is there.
 const SIGN_IN_URL = 'https://accounts.google.com/signin';
@@ -134,7 +134,7 @@ export async function waitRemoteLogin({ profile, timeoutSec = 240 }) {
       const page = getPage();
       // Flow moved from labs.google to flow.google.com; FLOW_URL may redirect.
       if (!/^https:\/\/(labs\.google|flow\.google\.com)\//.test(page.url())) {
-        await page.goto(FLOW_URL, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+        await page.goto(FLOW_URL, { waitUntil: 'load', timeout: 30000 }).catch(() => {});
       }
       flow = await verifyAccount({ enforceExpected: false }).catch(() => null);
       if (flow?.verified) break;

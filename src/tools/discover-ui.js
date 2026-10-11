@@ -33,14 +33,18 @@ function saveSelectors(map) {
   logger.info('Selectors map saved');
 }
 
+// flow.google.com: everything but the home page lives under a project.
+// {p} is the current project's id; project-scoped pages need one open.
 const PAGES = {
-  main: 'https://labs.google/fx/tools/flow',
-  characters: 'https://labs.google/fx/tools/flow/characters',
-  scenes: 'https://labs.google/fx/tools/flow/scenes',
-  toolsGallery: 'https://labs.google/fx/tools/flow/tools?tab=GALLERY',
-  gridArchitect: 'https://labs.google/fx/tools/flow/tools/grid-architect',
-  imageGeneration: 'https://labs.google/fx/tools/flow',
-  videoGeneration: 'https://labs.google/fx/tools/flow',
+  main: 'https://flow.google.com',
+  home: 'https://flow.google.com',
+  project: 'https://flow.google.com/project/{p}',
+  characters: 'https://flow.google.com/project/{p}/character',
+  scenes: 'https://flow.google.com/project/{p}',
+  toolsGallery: 'https://flow.google.com/project/{p}/tools',
+  gridArchitect: 'https://flow.google.com/project/{p}/tools',
+  imageGeneration: 'https://flow.google.com/project/{p}',
+  videoGeneration: 'https://flow.google.com/project/{p}',
 };
 
 const PAGE_SELECTOR_KEYS = {
@@ -64,13 +68,20 @@ export async function handleDiscoverUi(args) {
   let page = getPage();
   const pageName = args.page || 'main';
   const pageKey = getPageKey(pageName);
-  const url = args.url || PAGES[pageKey] || PAGES.main;
+  let url = args.url || PAGES[pageKey] || PAGES.main;
+  if (url.includes('{p}')) {
+    const projectId = page.url().split('/project/')[1]?.split(/[/?#]/)[0];
+    if (!projectId) {
+      throw new FlowError(ErrorCodes.INVALID_PARAMS, `Page "${pageName}" belongs to a project — open one first (flow_connect with project_id, or any tool with project_name).`);
+    }
+    url = url.replace('{p}', projectId);
+  }
 
   logger.info('Discovering UI', { page: pageName, pageKey, url: url?.substring(0, 80) });
 
   try {
     // Navigate to the page
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(url, { waitUntil: 'load', timeout: 30000 });
     await page.waitForTimeout(3000);
 
     const currentUrl = page.url();

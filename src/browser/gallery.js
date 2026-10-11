@@ -1,7 +1,9 @@
 import { logger } from '../utils/logger.js';
+import { fetchProjectContents, projectIdFromUrl, mediaIdsOfProject, waitForNewProjectMedia } from './flow-api.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { get } from '../utils/config.js';
 import { getPromptInput, fillPrompt, getGenerateButton } from './composer.js';
+import { humanClick } from './safe-actions.js';
 
 // Poll the DOM for new media ids appearing beyond a baseline set (post-Generate,
 // on both fresh generation and in-place follow-up edits). Requires the new-id
@@ -288,37 +290,54 @@ export async function verifyNewestTileIds(page, editIds, { checkLimit } = {}) {
 // (e.g. found via a prior listGenerations call whose tiles have since
 // scrolled out). Flow's SPA can bounce back to the gallery on a bad/stale id
 // — verified live — so the landing URL is always checked afterward.
+// Open a generation's /edit/ page the way a person does: from the project
+// gallery, by clicking its tile. A hard page.goto straight to /edit/{id}
+// loads fine, but an edit submitted from there was rejected by Flow's
+// reCAPTCHA ("unusual activity"); after a tile click it went through.
+// Tiles carry no ids — they are matched by their thumbnail token (flow-api.js).
 export async function navigateToGeneration(page, { id, url } = {}) {
   if (!id && !url) {
     throw new FlowError(ErrorCodes.INVALID_PARAMS, 'navigateToGeneration requires either id or url.');
   }
-
-  if (id) {
-    const tileLink = page.locator(`a[href*="/edit/${id}"]`).first();
-    if (await tileLink.isVisible().catch(() => false)) {
-      await tileLink.click();
-      await page.waitForTimeout(1000);
-      if (/\/edit\//.test(page.url())) return page.url();
+  if (url) {
+    const projectId = projectIdFromUrl(url);
+    id = url.split('/edit/')[1]?.split(/[/?#]/)[0];
+    if (!projectId || !id) throw new FlowError(ErrorCodes.INVALID_PARAMS, `Not an edit URL: ${url}`);
+    if (projectIdFromUrl(page.url()) !== projectId) {
+      await page.goto(`https://flow.google.com/project/${projectId}`, { waitUntil: 'load', timeout: 30000 });
     }
   }
+  if (page.url().includes(`/edit/${id}`)) return page.url();
 
-  const targetUrl = url
-    ? (url.startsWith('http') ? url : `https://labs.google/fx${url.startsWith('/fx') ? url.slice(3) : url}`)
-    : (() => {
-        const projectId = page.url().split('/project/')[1]?.split(/[/?#]/)[0];
-        if (!projectId) {
-          throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE, 'Could not determine current project id to build edit URL.');
-        }
-        return `https://labs.google/fx/en/tools/flow/project/${projectId}/edit/${id}`;
-      })();
-
-  await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 30000 });
-
-  if (!/\/edit\//.test(page.url())) {
-    throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-      `Navigated to ${targetUrl} but Flow redirected back to ${page.url()} — edit view did not load.`);
+  const projectId = projectIdFromUrl(page.url());
+  if (!projectId) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'Not inside a project — cannot open a generation by id.');
+  if (page.url().includes('/edit/')) {
+    await page.goto(`https://flow.google.com/project/${projectId}`, { waitUntil: 'load', timeout: 30000 });
   }
 
+  const { generations, media } = await fetchProjectContents(page, projectId);
+  const gen = generations.find(g => g.editId === id);
+  if (!gen) throw new FlowError(ErrorCodes.INVALID_PARAMS, `Generation ${id} is not in project ${projectId}.`);
+  const token = media.find(m => m.mediaId === gen.primaryMediaId)?.thumbToken;
+
+  const tile = token ? page.locator(`img[src*="${token}"]`).first() : null;
+  let found = false;
+  for (let i = 0; tile && i < 30 && !found; i++) {
+    found = await tile.isVisible().catch(() => false);
+    if (!found) { await page.mouse.wheel(0, 600); await page.waitForTimeout(400); }
+  }
+  if (found) {
+    await humanClick(page, tile);
+    await page.waitForURL(new RegExp(`/edit/${id}`), { timeout: 15000 }).catch(() => {});
+  }
+  if (!page.url().includes(`/edit/${id}`)) {
+    logger.warn('Gallery tile not found or click did not open it — loading the edit URL directly', { id });
+    await page.goto(`https://flow.google.com/project/${projectId}/edit/${id}`, { waitUntil: 'load', timeout: 30000 });
+  }
+  if (!/\/edit\//.test(page.url())) {
+    throw new FlowError(ErrorCodes.DOWNLOAD_FAILED, `Could not open generation ${id} — Flow shows ${page.url()}.`);
+  }
+  await page.waitForTimeout(1000);
   return page.url();
 }
 
@@ -386,7 +405,12 @@ export async function getMainPreviewMediaId(page) {
   }).catch(() => null);
 }
 
+// One follow-up step on an /edit/ page. New steps are detected through Flow's
+// project listing (media rows carry their workflow id), not the DOM — the page
+// has no media ids in it any more. Returns the new media rows ({mediaId, dimensions, …}).
 async function clickCreateAndWait(page, instruction, timeoutMs) {
+  const projectId = projectIdFromUrl(page.url());
+  const editId = page.url().split('/edit/')[1]?.split(/[/?#]/)[0];
   const promptInput = await getPromptInput(page);
   if (!promptInput) {
     throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE, 'Could not find the follow-up edit composer on the edit page.');
@@ -399,71 +423,58 @@ async function clickCreateAndWait(page, instruction, timeoutMs) {
   const disabled = await generateBtn.isDisabled().catch(() => false);
   if (disabled) throw new FlowError(ErrorCodes.GENERATION_BUTTON_DISABLED, 'Create button is disabled on edit page.');
 
-  const baselineIds = await getVisibleMediaIds(page);
+  const baseline = await mediaIdsOfProject(page, projectId);
   logger.info('Clicking Create for follow-up edit — credits will be spent', { instruction });
-  await generateBtn.click();
+  await humanClick(page, generateBtn);
 
-  const newIds = await waitForNewMedia(page, baselineIds, { timeoutMs });
-  if (newIds.length === 0) {
+  // An edit can return more than one variant (the composer's xN setting);
+  // they land a few seconds apart, so settle briefly after the first.
+  let fresh = (await waitForNewProjectMedia(page, projectId, baseline, { expected: 1, timeoutMs }))
+    .filter(m => m.editId === editId);
+  if (fresh.length) {
+    await page.waitForTimeout(8000);
+    const { media } = await fetchProjectContents(page, projectId);
+    fresh = media.filter(m => !baseline.has(m.mediaId) && m.editId === editId);
+  }
+  if (fresh.length === 0) {
     throw new FlowError(ErrorCodes.DOWNLOAD_FAILED,
-      'Follow-up edit completed but no new media was detected in the DOM.');
+      'Follow-up edit finished but no new step appeared on this generation. It may have been blocked; check it in Flow.');
   }
-
-  // Cross-check against the one thing that can't lie about what this edit produced:
-  // the main preview's own current src. See getMainPreviewMediaId for why baseline-
-  // diffing alone (waitForNewMedia) isn't trustworthy on this page.
-  const mainPreviewId = await getMainPreviewMediaId(page);
-  if (mainPreviewId && !newIds.includes(mainPreviewId)) {
-    logger.warn('Follow-up edit: main preview media id does not match any waitForNewMedia result — ' +
-      'likely a stale sibling thumbnail misattributed as the edit result', { newIds, mainPreviewId });
-    return [mainPreviewId];
-  }
-
-  return newIds;
+  return fresh;
 }
 
-// Follow-up (in-place) edit on the generation currently open on an /edit/
-// page — same Slate composer as the bottom bar, confirmed live: clicking
-// Create there updates the image without navigating away from /edit/{id}.
-// Caller must already be on an /edit/ page (checked here, not silently
-// handled — navigating there is a distinct, explicit step via
-// navigateToGeneration).
 export async function followUpEdit(page, instruction, { timeoutMs } = {}) {
   if (!/\/edit\//.test(page.url())) {
     throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
       'followUpEdit requires the page to already be on a generation\'s /edit/ page.');
   }
+  const projectId = projectIdFromUrl(page.url());
+  const editId = page.url().split('/edit/')[1]?.split(/[/?#]/)[0];
+  const before = await fetchProjectContents(page, projectId);
+  const current = before.media.find(m => m.mediaId === before.generations.find(g => g.editId === editId)?.primaryMediaId);
+  const beforeSize = current?.dimensions || null;
 
-  const beforeSize = await getMainPreviewImageSize(page);
-  let newIds = await clickCreateAndWait(page, instruction, timeoutMs);
-  const afterSize = await getMainPreviewImageSize(page);
+  const aspect = (d) => d.width / d.height;
+  let fresh = await clickCreateAndWait(page, instruction, timeoutMs);
+  const afterSize = fresh[0].dimensions;
 
-  // Confirmed live: the edit composer can silently change the canvas's
-  // aspect ratio (2048x2048 -> 2816x1536 on an otherwise-identical instruction),
-  // breaking anything downstream that assumes the follow-up preserves shape
-  // (e.g. paired white/black background generations that must be pixel-
-  // dimension-identical). Retry once with an explicit ratio-lock clause
-  // appended before giving up — this fixed it reliably in practice.
-  const ratioChanged = beforeSize && afterSize &&
-    Math.abs((beforeSize.width / beforeSize.height) - (afterSize.width / afterSize.height)) > 0.01;
-
-  if (ratioChanged) {
+  // Confirmed live (old Flow): an edit can silently change the canvas's aspect
+  // ratio. Retry once with an explicit ratio-lock clause before giving up.
+  if (beforeSize && afterSize && Math.abs(aspect(beforeSize) - aspect(afterSize)) > 0.01) {
     logger.warn('Follow-up edit changed the image aspect ratio — retrying once with an explicit ratio-lock clause', {
       instruction, beforeSize, afterSize,
     });
     const lockedInstruction = `${instruction} Keep the exact same aspect ratio and pixel dimensions as the image before this edit — do not change the canvas shape.`;
-    newIds = await clickCreateAndWait(page, lockedInstruction, timeoutMs);
-    const retrySize = await getMainPreviewImageSize(page);
-    const stillChanged = beforeSize && retrySize &&
-      Math.abs((beforeSize.width / beforeSize.height) - (retrySize.width / retrySize.height)) > 0.01;
-    if (stillChanged) {
+    fresh = await clickCreateAndWait(page, lockedInstruction, timeoutMs);
+    const retrySize = fresh[0].dimensions;
+    if (retrySize && Math.abs(aspect(beforeSize) - aspect(retrySize)) > 0.01) {
       throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
         `Follow-up edit changed the image aspect ratio even after a ratio-lock retry ` +
         `(before: ${beforeSize.width}x${beforeSize.height}, after: ${retrySize.width}x${retrySize.height}). ` +
         `The edit was still applied (new_media_ids below) — caller must decide whether to keep or discard it.`,
-        { newMediaIds: newIds, beforeSize, afterSize: retrySize });
+        { newMediaIds: fresh.map(m => m.mediaId), beforeSize, afterSize: retrySize });
     }
   }
 
-  return newIds;
+  return fresh.map(m => m.mediaId);
 }

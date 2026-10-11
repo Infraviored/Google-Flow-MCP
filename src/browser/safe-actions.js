@@ -87,7 +87,7 @@ export async function safeGoto(url, options = {}) {
 
   await delay(preDelay);
   logger.info('Navigating', { url: url.substring(0, 80) });
-  await page.goto(url, { waitUntil: 'networkidle', timeout });
+  await page.goto(url, { waitUntil: 'load', timeout });
   await delay(ACTION_DELAY);
 }
 
@@ -178,4 +178,33 @@ export async function detectPageElements() {
   });
 
   return elements;
+}
+
+// Flow greets with one-off overlays — a changelog dialog ("Get started"), the
+// cookie bar ("Hide") — that sit on top of the composer and swallow clicks.
+// Close whatever of them is showing; absent ones cost nothing.
+export async function dismissPopups(page) {
+  for (const name of ['Get started', 'Hide', 'Got it', 'Dismiss']) {
+    const btn = page.getByRole('button', { name, exact: true }).first();
+    if (await btn.isVisible().catch(() => false)) {
+      await btn.click().catch(() => {});
+      await page.waitForTimeout(400);
+    }
+  }
+}
+
+// Move the mouse to the element in steps, pause, click. Flow's reCAPTCHA
+// scores the session; an edit submitted with teleport clicks right after a
+// hard page load came back "We noticed some unusual activity" (not charged),
+// the same edit with a moving pointer went through.
+export async function humanClick(page, locator) {
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  const box = await locator.boundingBox();
+  if (!box) throw new Error('humanClick: element has no box (not visible)');
+  const x = box.x + box.width * (0.35 + Math.random() * 0.3);
+  const y = box.y + box.height * (0.35 + Math.random() * 0.3);
+  await page.mouse.move(x - 40 - Math.random() * 80, y + 30 + Math.random() * 60);
+  await page.mouse.move(x, y, { steps: 12 + Math.floor(Math.random() * 8) });
+  await page.waitForTimeout(150 + Math.random() * 250);
+  await page.mouse.click(x, y);
 }

@@ -23,7 +23,7 @@ export async function handleFlowStatus() {
       const page = getPage();
       status.currentUrl = page.url();
       status.pageTitle = await page.title();
-      status.flowAccessible = status.currentUrl?.includes('labs.google') || false;
+      status.flowAccessible = status.currentUrl?.includes('flow.google.com') || false;
       status.oauthRequired = status.currentUrl?.includes('accounts.google.com') || false;
 
       if (status.flowAccessible && !status.oauthRequired) {

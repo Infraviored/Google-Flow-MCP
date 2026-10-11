@@ -2,10 +2,11 @@ import path from 'path';
 import { logger } from '../utils/logger.js';
 import { get } from '../utils/config.js';
 import { launchChromeDirect, getActiveProfileKey } from './connect.js';
+import { dismissPopups } from './safe-actions.js';
 
 const CHROME_PATH = get('chromePath', '/opt/google/chrome/chrome');
 const CDP_PORT = get('cdpPort', 9222);
-const FLOW_URL = get('flowUrl', 'https://labs.google/fx/en/tools/flow');
+const FLOW_URL = get('flowUrl', 'https://flow.google.com');
 const CHROME_USER_DATA_DIR = get('chromeUserDataDir', path.resolve(process.env.HOME, '.config/google-chrome'));
 
 // config's `profiles` map is the single source of truth for every known
@@ -89,7 +90,7 @@ export async function recoverFromCrash(page) {
   if (!hasCrashed) return;
 
   logger.warn('Flow client-side crash detected, reloading once');
-  await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+  await page.reload({ waitUntil: 'load', timeout: 30000 });
   await page.waitForTimeout(2000);
   const stillCrashed = await page.locator('text=Application error').first().isVisible().catch(() => false);
   if (stillCrashed) {
@@ -99,15 +100,16 @@ export async function recoverFromCrash(page) {
 
 export async function navigateToFlow(page, toolPage, projectId) {
   const targetUrl = projectId
-    ? `https://labs.google/fx/en/tools/flow/project/${projectId}`
+    ? `https://flow.google.com/project/${projectId}`
     : toolPage === true
-      ? 'https://labs.google/fx/en/tools/flow'
+      ? 'https://flow.google.com'
       : FLOW_URL;
 
   logger.info('Navigating to Google Flow', { url: targetUrl });
-  await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 30000 });
+  await page.goto(targetUrl, { waitUntil: 'load', timeout: 30000 });
   await page.waitForTimeout(2000);
   await recoverFromCrash(page);
+  await dismissPopups(page);
 
   const currentUrl = page.url();
   logger.info('Flow page loaded', { url: currentUrl.substring(0, 100) });

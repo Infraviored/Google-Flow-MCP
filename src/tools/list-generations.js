@@ -1,8 +1,10 @@
 import { getPage } from '../browser/connect.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
-import { listGenerations } from '../browser/gallery.js';
-import { backfillTitle } from './generation-title.js';
+import { fetchProjectContents, projectIdFromUrl } from '../browser/flow-api.js';
+import { FlowError, ErrorCodes } from '../utils/errors.js';
 
+// Newest first, straight from Flow's project listing (the gallery DOM has no
+// ids or titles since flow.google.com).
 export async function handleListGenerations(args = {}) {
   const page = getPage();
 
@@ -13,19 +15,29 @@ export async function handleListGenerations(args = {}) {
       campaign: args.campaign,
     });
   }
+  const projectId = projectIdFromUrl(page.url());
+  if (!projectId) {
+    throw new FlowError(ErrorCodes.INVALID_PARAMS, 'Not inside a project — pass project_id or project_name.');
+  }
 
   const limit = Math.min(Math.max(args.limit || 20, 1), 100);
-  const tiles = await listGenerations(page, { limit });
-  const generations = tiles.map(t => ({
-    ...t,
-    title: backfillTitle(t.title, t.id),
-    editUrl: t.editUrl ? `https://labs.google/fx${t.editUrl.startsWith('/fx') ? t.editUrl.slice(3) : t.editUrl}` : null,
-  }));
+  const { generations, media } = await fetchProjectContents(page, projectId);
+  const list = generations
+    .map(g => {
+      const primary = media.find(m => m.mediaId === g.primaryMediaId);
+      return {
+        id: g.editId,
+        title: g.title,
+        createdAt: g.createdAt,
+        kind: primary?.kind || null,
+        prompt: primary?.prompt || null,
+        primaryMediaId: g.primaryMediaId,
+        steps: media.filter(m => m.editId === g.editId).length,
+        editUrl: `https://flow.google.com/project/${projectId}/edit/${g.editId}`,
+      };
+    })
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    .slice(0, limit);
 
-  return {
-    status: 'success',
-    count: generations.length,
-    generations,
-    note: 'title is null when neither the gallery DOM nor this process\'s job history has it (e.g. generations from before this MCP server started).',
-  };
+  return { status: 'success', projectId, count: list.length, generations: list };
 }

@@ -20,6 +20,8 @@ try {
 
 if (config.imageModels) {
   delete config.imageModels['Imagen 4'];
+  delete config.imageModels['Nano Banana 2'];
+  config.imageModels['Nano Banana 2.1'] = 'nano-banana-2-1';
   config.imageModels['Nano Banana 2 Lite'] = 'nano-banana-2-lite';
 }
 

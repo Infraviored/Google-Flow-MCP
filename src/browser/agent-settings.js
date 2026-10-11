@@ -7,13 +7,19 @@ import { FlowError, ErrorCodes } from '../utils/errors.js';
 // the bottom composer reliably respects the output-count setting (verified live) —
 // the sidebar can silently generate fewer images than requested. Always detect and
 // force "fresh" mode before generating, rather than adapting to whichever is open.
+// flow.google.com: the sidebar's close button is an icon button with
+// aria-label "Close" (ligature text "close").
+function sidebarCloseLocator(page) {
+  return page.getByRole('button', { name: 'Close', exact: true }).first();
+}
+
 export async function isSidebarOpen(page) {
-  const closeBtn = page.locator('button').filter({ hasText: 'Close' }).first();
+  const closeBtn = sidebarCloseLocator(page);
   return await closeBtn.isVisible().catch(() => false);
 }
 
 export async function closeSidebar(page) {
-  const closeBtn = page.locator('button').filter({ hasText: 'Close' }).first();
+  const closeBtn = sidebarCloseLocator(page);
   const visible = await closeBtn.isVisible().catch(() => false);
   if (!visible) return;
 
@@ -37,7 +43,7 @@ export async function closeSidebar(page) {
 }
 
 function agentToggleLocator(page) {
-  return page.locator('button:has(span.content:text-is("Agent"))').first();
+  return page.locator('button.agent-mode-chip').first();
 }
 
 export async function isAgentModeOn(page) {
@@ -78,11 +84,24 @@ export async function ensureAgentOff(page) {
 // nested model sub-dropdown always shows a real model name regardless of
 // mode (confirmed live) and is matched separately, scoped inside the menu.
 function inlineSettingsTriggerLocator(page) {
-  return page.locator('button[aria-haspopup="menu"]').filter({ hasText: /Nano|Banana|Omni|Veo|Imagen|Video/ }).first();
+  return page.getByRole('button', { name: 'Settings trigger', exact: true }).first();
 }
 
+// The settings popover is an Angular CDK overlay holding mat-button-toggle
+// groups (each option a button[role=radio] with aria-checked) and the model
+// family dropdown.
 function openMenuLocator(page) {
-  return page.locator('[role="menu"][data-state="open"]').first();
+  return page.locator('.cdk-overlay-pane').filter({ has: page.locator('[aria-label="Select model family"]') }).first();
+}
+
+function modelDropdownLocator(menu) {
+  return menu.locator('[aria-label="Select model family"]').first();
+}
+
+// Option text carries icon ligatures ("crop_square1:1", "volume_upVeo 3.1 - Fast");
+// match on the visible label as a suffix so "Nano Banana 2" never hits "Nano Banana 2.1".
+function exactSuffix(label) {
+  return new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`);
 }
 
 export async function isSettingsPanelOpen(page) {
@@ -101,10 +120,16 @@ export async function ensureSettingsPanelOpen(page, { mode = 'image' } = {}) {
       );
     }
 
-    await trigger.click();
-    await page.waitForTimeout(400);
-
-    const opened = await isSettingsPanelOpen(page);
+    // The previous popover may still be animating out; a click during that
+    // window is swallowed. Poll, and click once more if it never opened.
+    let opened = false;
+    for (let attempt = 0; attempt < 2 && !opened; attempt++) {
+      await trigger.click();
+      for (let i = 0; i < 10 && !opened; i++) {
+        await page.waitForTimeout(200);
+        opened = await isSettingsPanelOpen(page);
+      }
+    }
     if (!opened) {
       throw new FlowError(
         ErrorCodes.UNKNOWN_UI_CHANGE,
@@ -116,9 +141,9 @@ export async function ensureSettingsPanelOpen(page, { mode = 'image' } = {}) {
   // Ensure the correct mode tab (IMAGE vs VIDEO) inside the menu is active
   const menu = openMenuLocator(page);
   const targetLabel = mode === 'video' ? 'Video' : 'Image';
-  const modeTab = menu.locator('[role="tab"]').filter({ hasText: targetLabel }).first();
+  const modeTab = menu.locator('button[role="radio"]').filter({ hasText: exactSuffix(targetLabel) }).first();
   if (await modeTab.isVisible().catch(() => false)) {
-    const isSelected = (await modeTab.getAttribute('aria-selected')) === 'true';
+    const isSelected = (await modeTab.getAttribute('aria-checked')) === 'true';
     if (!isSelected) {
       logger.info(`Switching settings panel mode tab to ${targetLabel}`);
       await modeTab.click();
@@ -129,24 +154,22 @@ export async function ensureSettingsPanelOpen(page, { mode = 'image' } = {}) {
 
 export async function closeSettingsPanel(page) {
   if (!(await isSettingsPanelOpen(page))) return;
-  const trigger = inlineSettingsTriggerLocator(page);
-  if (await trigger.isVisible().catch(() => false)) {
-    await trigger.click();
-    await page.waitForTimeout(300);
-  }
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
 }
 
 export async function readSettings(page, { mode = 'image' } = {}) {
   await ensureSettingsPanelOpen(page, { mode });
   const menu = openMenuLocator(page);
 
-  const tabs = await menu.locator('[role="tab"]').all();
+  const tabs = await menu.locator('button[role="radio"]').all();
   let activeRatio = null;
   let activeQuantity = null;
+  let activeDuration = null;
 
   for (const tab of tabs) {
     if (!(await tab.isVisible().catch(() => false))) continue;
-    const isSelected = (await tab.getAttribute('aria-selected')) === 'true';
+    const isSelected = (await tab.getAttribute('aria-checked')) === 'true';
     if (!isSelected) continue;
 
     const text = (await tab.innerText().catch(() => '')).trim().replace(/\s+/g, ' ');
@@ -155,6 +178,10 @@ export async function readSettings(page, { mode = 'image' } = {}) {
         if (text.includes(r)) { activeRatio = r; break; }
       }
     }
+    if (!activeDuration) {
+      const d = text.match(/(\d+)s$/);
+      if (d) activeDuration = `${d[1]}s`;
+    }
     if (!activeQuantity) {
       for (const q of ['x1', 'x2', 'x3', 'x4']) {
         if (text.includes(q)) { activeQuantity = parseInt(q.replace('x', ''), 10); break; }
@@ -162,7 +189,7 @@ export async function readSettings(page, { mode = 'image' } = {}) {
     }
   }
 
-  const modelBtn = menu.locator('button[aria-haspopup="menu"]').filter({ hasText: /Nano|Banana|Omni|Veo|Imagen/ }).first();
+  const modelBtn = modelDropdownLocator(menu);
   let activeModel = null;
   if (await modelBtn.isVisible().catch(() => false)) {
     const rawText = await modelBtn.innerText().catch(() => '');
@@ -175,18 +202,19 @@ export async function readSettings(page, { mode = 'image' } = {}) {
   return {
     ratio: activeRatio,
     quantity: activeQuantity,
+    ...(mode === 'video' && { duration: activeDuration }),
     model: activeModel,
     mode,
   };
 }
 
-export async function applySettings(page, { ratio, model, quantity, mode = 'image' }) {
+export async function applySettings(page, { ratio, model, quantity, duration, mode = 'image' }) {
   logger.info('Applying settings via Agent-OFF settings menu', { ratio, model, quantity, mode });
   await ensureSettingsPanelOpen(page, { mode });
   const menu = openMenuLocator(page);
 
   if (ratio) {
-    const ratioTab = menu.locator('[role="tab"]').filter({ hasText: ratio }).first();
+    const ratioTab = menu.locator('button[role="radio"]').filter({ hasText: exactSuffix(ratio) }).first();
     if (await ratioTab.isVisible().catch(() => false)) {
       await ratioTab.click();
       await page.waitForTimeout(300);
@@ -200,7 +228,7 @@ export async function applySettings(page, { ratio, model, quantity, mode = 'imag
 
   if (quantity) {
     const qtyText = `x${quantity}`;
-    const qtyTab = menu.locator('[role="tab"]').filter({ hasText: qtyText }).first();
+    const qtyTab = menu.locator('button[role="radio"]').filter({ hasText: exactSuffix(qtyText) }).first();
     if (await qtyTab.isVisible().catch(() => false)) {
       await qtyTab.click();
       await page.waitForTimeout(300);
@@ -213,7 +241,7 @@ export async function applySettings(page, { ratio, model, quantity, mode = 'imag
   }
 
   if (model) {
-    const modelDropdown = menu.locator('button[aria-haspopup="menu"]').filter({ hasText: /Nano|Banana|Omni|Veo|Imagen/ }).first();
+    const modelDropdown = modelDropdownLocator(menu);
 
     if (await modelDropdown.isVisible().catch(() => false)) {
       await modelDropdown.click();
@@ -221,7 +249,7 @@ export async function applySettings(page, { ratio, model, quantity, mode = 'imag
 
       const modelOption = page
         .locator('[role="menuitem"], [role="option"]')
-        .filter({ hasText: model })
+        .filter({ hasText: exactSuffix(model) })
         .first();
 
       if (await modelOption.isVisible().catch(() => false)) {
@@ -246,6 +274,17 @@ export async function applySettings(page, { ratio, model, quantity, mode = 'imag
     }
   }
 
+  if (duration && mode === 'video') {
+    const durTab = menu.locator('button[role="radio"]').filter({ hasText: exactSuffix(duration) }).first();
+    if (!(await durTab.isVisible().catch(() => false))) {
+      throw new FlowError(ErrorCodes.INVALID_PARAMS,
+        `Duration "${duration}" is not offered for ${model || 'this video model'} — only Omni 1.1 Flash has a ` +
+        'duration choice (4s/6s/8s/10s); the Veo models have a fixed length. Omit duration for Veo.');
+    }
+    await durTab.click();
+    await page.waitForTimeout(300);
+  }
+
   // Read back settings to verify they actually changed
   const current = await readSettings(page, { mode });
 
@@ -260,6 +299,13 @@ export async function applySettings(page, { ratio, model, quantity, mode = 'imag
     throw new FlowError(
       ErrorCodes.UNKNOWN_UI_CHANGE,
       `Failed to apply quantity setting: requested ${quantity}, but panel shows ${current.quantity}.`
+    );
+  }
+
+  if (duration && mode === 'video' && current.duration !== duration) {
+    throw new FlowError(
+      ErrorCodes.UNKNOWN_UI_CHANGE,
+      `Failed to apply duration: requested ${duration}, but panel shows ${current.duration}.`
     );
   }
 
