@@ -5,10 +5,9 @@ import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { get } from '../utils/config.js';
 import { getActiveExpectedAccount } from '../browser/launch-profile.js';
-import { detectPageElements } from '../browser/safe-actions.js';
 import { saveMetadata } from '../utils/file-manager.js';
 import { ensureProjectInContext, navigateToSidebar } from '../navigation/project-navigator.js';
-import { getPromptInput, fillPrompt, clickGenerateButton } from '../browser/composer.js';
+import { getPromptInput, fillPrompt } from '../browser/composer.js';
 import { humanClick } from '../browser/safe-actions.js';
 
 export async function handleCreateCharacter(args) {
@@ -182,22 +181,4 @@ export async function handleCreateCharacter(args) {
     jobQueue.failJob(job.id, err);
     throw err;
   }
-}
-
-export async function handleListCharacters() {
-  const page = getPage();
-  await navigateToSidebar(page, 'Characters');
-  await page.waitForTimeout(2000);
-
-  const elements = await detectPageElements(page);
-  const characterCards = elements.buttons.filter(b =>
-    !b.text.includes('New') && !b.text.includes('Create') && b.text.length > 2
-  );
-
-  return {
-    status: 'success',
-    characters_found: characterCards,
-    raw_elements: elements,
-    screenshot: await takeScreenshot(page, 'characters-list'),
-  };
 }
