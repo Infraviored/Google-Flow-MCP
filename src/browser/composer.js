@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
+import { humanClick } from './safe-actions.js';
 
 // Image and video share the exact same bottom composer bar (Slate-based
 // contenteditable, "Create" button with an arrow_forward icon) — this module
@@ -52,13 +53,17 @@ export async function fillPrompt(page, promptInput, text) {
       `Prompt is ${singleLine.length} characters — Flow enforces a ${PROMPT_CHAR_LIMIT}-character limit. Shorten to ${PROMPT_CHAR_LIMIT} chars or fewer and retry.`
     );
   }
-  await promptInput.click();
+  await humanClick(page, promptInput);
   await promptInput.fill('');
   await page.waitForTimeout(200);
-  // delay: 15ms/char blows past Playwright's default 30s action timeout on
-  // long prompts (confirmed live: a ~1900-char prompt timed out) — drop the
-  // per-char delay to 5ms and set an explicit generous timeout to match.
-  await promptInput.type(singleLine, { delay: 5, timeout: 60000 });
+  // Type at a human pace. Confirmed live on flow.google.com: the same edit
+  // instruction typed at 5 ms/char was rejected by Flow's reCAPTCHA ("unusual
+  // activity"), typed at ~60 ms/char it went through. A 1400-char prompt takes
+  // about a minute this way — the cost of not being flagged.
+  for (const ch of singleLine) {
+    await page.keyboard.type(ch);
+    await page.waitForTimeout(25 + Math.random() * 60);
+  }
   await page.waitForTimeout(500);
 }
 

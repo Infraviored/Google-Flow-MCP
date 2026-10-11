@@ -248,7 +248,7 @@ export function importProjectContents({ projectId, generations, media }) {
       if (g.title) { gen.titleKey = normalizeTitle(g.title); titles++; }
       if (g.createdAt) gen.createdAt = g.createdAt;
       if (!gen.editUrl && projectId) {
-        gen.editUrl = `https://labs.google/fx/en/tools/flow/project/${projectId}/edit/${g.editId}`;
+        gen.editUrl = `https://flow.google.com/project/${projectId}/edit/${g.editId}`;
       }
       gens++;
       for (const m of byEdit.get(g.editId) || []) {

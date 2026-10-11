@@ -8,7 +8,7 @@ import { ensureProjectInContext } from '../navigation/project-navigator.js';
 import { get } from '../utils/config.js';
 import { getActiveExpectedAccount } from '../browser/launch-profile.js';
 
-const ENGINE_OPTIONS = ['Nano Banana 2', 'Nano Banana Pro'];
+const ENGINE_OPTIONS = ['Nano Banana 2', 'Nano Banana Pro'];  // the applet's own list, not the composer's
 const RATIO_OPTIONS = ['1:1', '16:9', '9:16', '4:3', '3:4'];
 const VISUAL_LOGIC_OPTIONS = ['Style from References', 'Ultra Realistic', 'Cinematic Movie', 'Film Noir', 'Anime / Manga'];
 
@@ -22,8 +22,20 @@ function exactText(s) {
 // 'Start Architecting'}) never finds anything because the button simply
 // isn't in the main document. This is why every previous attempt at wiring
 // this tool's form silently failed. Always go through this frameLocator.
-function appletFrame(page) {
-  return page.frameLocator('iframe[title="Applet preview"]');
+// The applet runs in an untitled, sandboxed child frame (srcdoc/blob on
+// *.usercontent.goog) — the old iframe[title="Applet preview"] is gone. Find
+// the frame that actually holds the "Start Architecting" splash button.
+async function appletFrame(page, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const f of page.frames()) {
+      if (f === page.mainFrame()) continue;
+      const n = await f.locator('button').filter({ hasText: /architect/i }).count().catch(() => 0);
+      if (n > 0) return f;
+    }
+    await page.waitForTimeout(500);
+  }
+  return null;
 }
 
 // Each dropdown (ENGINE / FORMAT RATIO / VISUAL LOGIC) is a trigger button
@@ -81,7 +93,7 @@ export async function handleUseGridArchitect(args) {
     }
 
     // Step 2: Navigate to project Tools section
-    const toolsUrl = `https://labs.google/fx/tools/flow/project/${projectId}/tools`;
+    const toolsUrl = `https://flow.google.com/project/${projectId}/tools`;
     logger.info('Navigating to project tools page', { toolsUrl });
     await page.goto(toolsUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000);
@@ -128,9 +140,9 @@ export async function handleUseGridArchitect(args) {
     // Step 6: Enter the tool's config UI. It lives inside a sandboxed
     // <iframe title="Applet preview"> — not the top-level page — behind a
     // "Start Architecting" splash button.
-    const frame = appletFrame(page);
-    const startBtn = frame.locator('button').filter({ hasText: /architect/i }).first();
-    const startVisible = await startBtn.isVisible({ timeout: 10000 }).catch(() => false);
+    const frame = await appletFrame(page);
+    const startBtn = frame?.locator('button').filter({ hasText: /architect/i }).first();
+    const startVisible = startBtn ? await startBtn.isVisible().catch(() => false) : false;
     if (!startVisible) {
       await takeScreenshot(page, 'grid-architect-no-start-button');
       throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,

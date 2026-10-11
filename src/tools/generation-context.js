@@ -1,4 +1,5 @@
-import { navigateToGeneration, listHistorySteps, getGenerationTitle } from '../browser/gallery.js';
+import { navigateToGeneration } from '../browser/gallery.js';
+import { fetchProjectContents } from '../browser/flow-api.js';
 import { mergeHistorySteps } from '../utils/media-index.js';
 import { logger } from '../utils/logger.js';
 
@@ -17,25 +18,31 @@ function idsFromUrl(url) {
   };
 }
 
-export async function syncCurrent(page) {
+// Reads a generation's steps from Flow's API (one row per media item, each
+// with its own prompt) instead of the history panel, which no longer carries
+// media ids in its DOM. Works from any page inside the project — no navigation.
+export async function syncCurrent(page, editIdArg = null) {
   const url = page.url();
-  const { editId, projectId } = idsFromUrl(url);
-  if (!editId) return null;
+  const { editId: fromUrl, projectId } = idsFromUrl(url);
+  const editId = editIdArg || fromUrl;
+  if (!editId || !projectId) return null;
 
-  const [title, steps] = await Promise.all([
-    getGenerationTitle(page).catch(() => null),
-    listHistorySteps(page).catch(() => []),
-  ]);
+  const { generations, media } = await fetchProjectContents(page, projectId);
+  const title = generations.find(g => g.editId === editId)?.title || null;
+  const steps = media
+    .filter(m => m.editId === editId)
+    .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+    .map((m, index) => ({ index, mediaId: m.mediaId, prompt: m.prompt }));
 
-  if (!steps.length) {
-    logger.warn('Sync found no history steps on an /edit/ page — nothing recorded for this generation', { editId });
-  }
-
-  mergeHistorySteps(editId, steps, { editUrl: url, projectId, title });
-  return { editId, projectId, editUrl: url, title, stepCount: steps.length };
+  const editUrl = `https://flow.google.com/project/${projectId}/edit/${editId}`;
+  mergeHistorySteps(editId, steps, { editUrl, projectId, title });
+  return { editId, projectId, editUrl, title, stepCount: steps.length };
 }
 
 export async function openAndSync(page, { id, url } = {}) {
-  if (id || url) await navigateToGeneration(page, { id, url });
-  return syncCurrent(page);
+  const editId = id || url?.split('/edit/')[1]?.split(/[/?#]/)[0] || null;
+  if (url && !page.url().includes(`/project/${idsFromUrl(url).projectId}`)) {
+    await navigateToGeneration(page, { url });
+  }
+  return syncCurrent(page, editId);
 }

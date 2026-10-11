@@ -13,7 +13,7 @@ import fs from 'fs';
 import path from 'path';
 
 const VIDEO_MODEL_MAP = {
-  'Omni Flash': 'omni_flash',
+  'Omni 1.1 Flash': 'abra',
   'Veo 3.1 - Quality': 'veo_3_1_quality',
   'Veo 3.1 - Fast': 'veo_3_1_fast',
   'Veo 3.1 - Lite': 'veo_3_1_lite',
@@ -33,19 +33,18 @@ function selectVideoModel(requested) {
   if (requested === 'quality' || requested === 'premium') return 'Veo 3.1 - Quality';
   if (requested === 'fast' || requested === 'speed') return 'Veo 3.1 - Fast';
   if (requested === 'lite' || requested === 'test') return 'Veo 3.1 - Lite';
-  if (requested === 'flash' || requested === 'simple') return 'Omni Flash';
+  if (requested === 'flash' || requested === 'simple') return 'Omni 1.1 Flash';
   if (available[requested]) return requested;
   return null;
 }
 
-let lastAppliedVideoSettings = null;
 
 export async function handleGenerateVideo(args) {
   const job = jobQueue.createJob('video_generation', {
     prompt: args.prompt,
     model: args.model || 'auto',
     ratio: args.ratio || '16:9',
-    duration: args.duration || '4s',
+    duration: args.duration || null,
     quantity: args.quantity || 1,
     outputFolder: args.output_folder,
     useCharacter: args.use_character,
@@ -75,7 +74,7 @@ export async function handleGenerateVideo(args) {
     if (preGenUrl.includes('/edit/')) {
       const projectRootUrl = preGenUrl.split('/edit/')[0];
       logger.info('On a generation edit page — navigating back to project root for fresh composer', { from: preGenUrl, to: projectRootUrl });
-      await page.goto(projectRootUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(projectRootUrl, { waitUntil: 'load', timeout: 30000 });
       await page.waitForTimeout(1500);
     }
 
@@ -97,46 +96,15 @@ export async function handleGenerateVideo(args) {
     logger.info('Using video model', { model });
 
     const ratio = args.ratio || '16:9';
-    const quantity = Math.min(Math.max(args.quantity || 1, 1), 4);
-    const settingsChanged = !lastAppliedVideoSettings ||
-      lastAppliedVideoSettings.model !== model ||
-      lastAppliedVideoSettings.ratio !== ratio ||
-      lastAppliedVideoSettings.quantity !== quantity;
-
-    if (settingsChanged) {
-      logger.info('Applying video settings via Agent Settings UI panel', { model, ratio, quantity });
-      const applied = await applySettings(page, { model, ratio, quantity, mode: 'video' });
-      lastAppliedVideoSettings = {
-        model: applied.model || model,
-        ratio: applied.ratio || ratio,
-        quantity: applied.quantity || quantity,
-      };
-      logger.info('Agent video settings updated via UI', lastAppliedVideoSettings);
-    }
-
-    // Ratio validated against video-specific allowlist; model/ratio/quantity
-    // themselves are already applied above via the Agent Settings UI panel
-    // (applySettings) — do not re-click model/ratio/quantity controls here,
-    // that duplicated logic used stale ad-hoc selectors and could fight the
-    // settings panel's own state.
     const ratios = get('videoRatios', ['9:16', '16:9']);
     if (!ratios.includes(ratio)) {
-      throw new FlowError(ErrorCodes.RATIO_NOT_AVAILABLE, `Ratio ${ratio} not available for video`);
+      throw new FlowError(ErrorCodes.RATIO_NOT_AVAILABLE, `Ratio ${ratio} not available for video. Available: ${ratios.join(', ')}`);
     }
-
-    // Select duration (not covered by applySettings)
-    const durations = get('durations', ['4s', '6s', '8s', '10s']);
-    const duration = args.duration || '4s';
-    if (!durations.includes(duration)) {
-      logger.warn('Duration not available, using 4s', { requested: duration });
-    }
-    try {
-      const durBtn = page.locator(`button:has-text("${duration}")`).first();
-      if (await durBtn.isVisible().catch(() => false)) {
-        await durBtn.click();
-        await page.waitForTimeout(500);
-      }
-    } catch { /* ok */ }
+    // Only Omni 1.1 Flash offers a duration; Veo models have a fixed length.
+    const duration = args.duration ? `${parseInt(args.duration, 10)}s` : null;
+    const quantity = Math.min(Math.max(args.quantity || 1, 1), 4);
+    logger.info('Applying video settings', { model, ratio, duration, quantity });
+    await applySettings(page, { model, ratio, quantity, duration, mode: 'video' });
 
     const qty = Math.min(Math.max(args.quantity || 1, 1), 4);
 

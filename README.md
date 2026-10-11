@@ -3,7 +3,7 @@
 
 # 🧠 Google Flow Browser MCP
 
-**Control [Google Flow](https://labs.google/fx/tools/flow) — image & video generation — directly from your AI agent via MCP.**
+**Control [Google Flow](https://flow.google.com) — image & video generation — directly from your AI agent via MCP.**
 
 <p>
   <img src="https://img.shields.io/badge/version-1.0.0-blue?style=flat-square" alt="Version 1.0.0">
@@ -33,9 +33,9 @@
 
 ## 📸 What It Does
 
-This MCP server connects your AI agent to **[Google Flow](https://labs.google/fx/tools/flow)** — Google's creative suite for image and video generation. Your agent can:
+This MCP server connects your AI agent to **[Google Flow](https://flow.google.com)** — Google's creative suite for image and video generation. Your agent can:
 
-- 🎨 **Generate images** with Nano Banana Pro, Nano Banana 2, or Imagen 4
+- 🎨 **Generate images** with Nano Banana 2.1, Nano Banana Pro, or Nano Banana 2 Lite
 - 🎬 **Create videos** and scenes with characters
 - 🧑 **Manage characters** and scenes in your Flow workspace
 - 🖼️ **Use Grid Architect** for batch shot generation
@@ -153,7 +153,7 @@ Pick any `profile` label you like — it's just a directory name, no requirement
 
 **B) Seed from an already-signed-in system Chrome profile** (no manual step at connect time, but requires prep in your *real* Chrome first):
 1. In your real Chrome, create a new profile (Chrome's own profile picker → "Add") and sign into the Google account you want to use.
-2. **While still in that profile**, visit **https://labs.google/fx/tools/flow** and accept Flow's terms/contract once — otherwise the seeded copy will land on the same one-time contract-acceptance screen the very first time you use it.
+2. **While still in that profile**, visit **https://flow.google.com** and accept Flow's terms/contract once — otherwise the seeded copy will land on the same one-time contract-acceptance screen the very first time you use it.
 3. Find that profile's directory name: go to `chrome://version/` in it and read **"Profile Path"** — the last folder name (e.g. `Profile 3`) is what you need.
 4. Hand that name to `flow_connect` as `source_profile`, along with your own chosen `profile` label — only needed this once:
    ```
@@ -164,6 +164,24 @@ Pick any `profile` label you like — it's just a directory name, no requirement
 **Why an isolated copy instead of automating your real profile directly?** Chrome won't run two instances against the same profile directory at once (`SingletonLock`) — pointing automation straight at your daily-driver profile would either fail to start or force-close your real browser. The copy is a one-time snapshot at connect time (not a live sync), so your real profile is never touched again afterward and automation flags never bleed into your everyday browsing fingerprint.
 
 Switching `profile` on a later call automatically closes whatever's running and relaunches under the requested one. Once a profile has a recorded `expectedAccount`, future connects under that same key verify against it and fail loud on a mismatch; a brand-new profile with nothing recorded yet just reports whichever account is found.
+
+#### Server without a screen
+
+Ask your agent to "create a profile" (or a second one). It calls `flow_login_start({ profile: "main" })`,
+which opens Chrome for that profile on a virtual display and serves it as a web page on
+`127.0.0.1:6080` (x11vnc + noVNC — `apt install xvfb x11vnc novnc websockify`). The agent hands you
+two things:
+
+```bash
+ssh -N -L 6080:127.0.0.1:6080 you@your-server     # on your own computer
+# then open http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+```
+
+Sign in to Google there (2FA included) and accept Flow's terms if asked. `flow_login_wait` notices the
+sign-in, records the account in `config.profiles`, and closes the viewer. From then on
+`flow_connect({ profile: "main", virtual_display: true })` runs without a screen. The viewer only ever
+listens on localhost; set `loginSshHost` in the config if the suggested ssh target is wrong
+(`loginWebPort` / `loginVncPort` change the ports).
 
 ### 5️⃣ Register with OpenCode
 
@@ -180,6 +198,25 @@ Switching `profile` on a later call automatically closes whatever's running and 
 ```
 
 ---
+
+## 🔄 flow.google.com (October 2026)
+
+Flow moved from `labs.google/fx/tools/flow` (Next.js, tRPC) to **`flow.google.com`** (Angular). What changed for this server:
+
+- **Data comes from Flow's own RPCs**, not the DOM. Gallery tiles no longer carry ids or links, and the old
+  `labs.google/fx/api/trpc/*` endpoints are gone. `src/browser/rpc.js` calls Flow's `batchexecute` endpoint from
+  inside the page (same cookies and XSRF token Flow uses); `src/browser/flow-api.js` wraps it:
+  project list (`UpteDb`), a project's generations and every media step with its prompt (`Zzl0ze`), and a signed
+  full-size download URL per media item (`as29s`). New results are detected by diffing that listing, not the gallery.
+- **Bot check:** Flow scores the session with reCAPTCHA. Prompts typed at 5 ms/char and teleport clicks got edits
+  rejected ("We noticed some unusual activity … You have not been charged"); typing at a human pace, moving the
+  pointer before clicks (`humanClick`), and opening a generation by clicking its gallery tile instead of loading
+  `/edit/{id}` directly made them go through. A rejection is reported at once with
+  `MANUAL_VERIFICATION_REQUIRED` instead of waiting for a timeout.
+- **Routes:** project `/project/{id}`, generation `/project/{id}/edit/{id}`, characters `/project/{id}/character`,
+  tools `/project/{id}/tools`. Scenes and Images are only gallery filters.
+- **Settings:** the composer's settings popover is shared by image and video; it is applied on every call (never
+  cached) and image generation refuses to click unless the composer shows an image model.
 
 ## 🏗️ Architecture
 
@@ -253,14 +290,14 @@ All tools are organized by function for easy discovery.
 
 | Tool | Description |
 |------|-------------|
-| `flow_generate_image` | Generate image with **Nano Banana Pro**, **Nano Banana 2**, or **Imagen 4**. Supports aspect ratios, reference images, and brand-based model selection. |
+| `flow_generate_image` | Generate image with **Nano Banana 2.1**, **Nano Banana Pro**, or **Nano Banana 2 Lite**. Supports aspect ratios, reference images, and brand-based model selection. |
 | `flow_download_latest` | Download the most recently generated file |
 
 ### 🎬 Video Generation
 
 | Tool | Description |
 |------|-------------|
-| `flow_generate_video` | Set up video generation (Omni Flash, Veo models, custom duration/ratio). ⚠️ **Stops at "ready to generate" — no credit consumed.** |
+| `flow_generate_video` | Set up video generation (Omni 1.1 Flash with 4/6/8/10 s, or Veo 3.1 Lite/Fast/Quality at fixed length). ⚠️ **Stops at "ready to generate" — no credit consumed.** |
 | `flow_create_scene` | Create a video scene with characters and a text prompt |
 
 ### 👤 Characters
@@ -325,8 +362,8 @@ Edit `config/flow.config.json` (copy from `config/flow.config.example.json`):
 
 | Key | Description |
 |-----|-------------|
-| `imageModels` | Available models: `Nano Banana Pro`, `Nano Banana 2`, `Imagen 4` |
-| `videoModels` | Available models: `Omni Flash`, `Veo 3.1 - Lite/Fast/Quality` |
+| `imageModels` | Available models: `Nano Banana 2.1`, `Nano Banana Pro`, `Nano Banana 2 Lite` |
+| `videoModels` | Available models: `Omni 1.1 Flash`, `Veo 3.1 - Lite/Fast/Quality` |
 | `ratios` | Supported aspect ratios: `16:9`, `4:3`, `1:1`, `3:4`, `9:16` |
 
 ---
@@ -398,7 +435,7 @@ Run `flow_discover_ui` to re-map selectors. The `selectors.map.json` will auto-u
 <details>
 <summary><strong>How do I generate images?</strong></summary>
 
-Your AI agent calls `flow_generate_image` with a text prompt. Optionally specify model (`Nano Banana 2` is default), aspect ratio, and reference images. The server waits for completion and makes the file available for download.
+Your AI agent calls `flow_generate_image` with a text prompt. Optionally specify model (`Nano Banana 2.1` is default), aspect ratio, and reference images. The server waits for completion and makes the file available for download.
 </details>
 
 <details>

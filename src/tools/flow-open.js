@@ -4,7 +4,7 @@ import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { get } from '../utils/config.js';
 
-const FLOW_URL = get('flowUrl', 'https://labs.google/fx/tools/flow');
+const FLOW_URL = get('flowUrl', 'https://flow.google.com');
 
 export async function handleFlowOpen(args) {
   const page = getPage();
@@ -14,7 +14,7 @@ export async function handleFlowOpen(args) {
   logger.info('Opening Flow page', { url: url.substring(0, 80) });
 
   try {
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(url, { waitUntil: 'load', timeout: 30000 });
     await page.waitForTimeout(waitFor);
 
     const currentUrl = page.url();
@@ -25,7 +25,7 @@ export async function handleFlowOpen(args) {
     // Detect if we're on a login page or the actual Flow
     const pageContent = await page.textContent('body') || '';
     const isLoggedIn = !pageContent.includes('Sign in') && !currentUrl.includes('SignOut');
-    const isFlowPage = currentUrl.includes('labs.google/fx/tools/flow') || currentUrl.includes('labs.google');
+    const isFlowPage = currentUrl.includes('flow.google.com');
 
     return {
       status: isLoggedIn && isFlowPage ? 'connected' : 'needs_login',

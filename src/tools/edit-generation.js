@@ -1,6 +1,7 @@
 import { getPage } from '../browser/connect.js';
 import { ensureProjectInContext } from '../navigation/project-navigator.js';
-import { navigateToGeneration, followUpEdit, getGenerationTitle } from '../browser/gallery.js';
+import { navigateToGeneration, followUpEdit } from '../browser/gallery.js';
+import { fetchProjectContents, projectIdFromUrl } from '../browser/flow-api.js';
 import { getPromptInput, fillPrompt } from '../browser/composer.js';
 import { takeScreenshot } from '../utils/screenshots.js';
 import { FlowError, ErrorCodes } from '../utils/errors.js';
@@ -53,8 +54,10 @@ export async function handleEditGeneration(args = {}) {
   });
 
   const editId = page.url().split('/edit/')[1]?.split(/[/?#]/)[0];
-  const title = await getGenerationTitle(page).catch(() => null);
-  recordGeneration({ editId, editUrl: page.url(), title });
+  const projectId = projectIdFromUrl(page.url());
+  const { generations } = await fetchProjectContents(page, projectId);
+  const title = generations.find(g => g.editId === editId)?.title || null;
+  recordGeneration({ editId, projectId, editUrl: page.url(), title });
   // The instruction IS the prompt for the step this edit just produced. Without
   // recording it here there is no way to tell later which of a generation's
   // steps is the black-background pass and which is the white one.

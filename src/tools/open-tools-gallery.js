@@ -57,8 +57,8 @@ export async function handleOpenTool(args) {
   } else {
     logger.warn('Tool not found in sidebar, trying direct URL');
     const toolSlug = toolName.toLowerCase().replace(/\s+/g, '-');
-    await page.goto(`https://labs.google/fx/tools/flow/tools/${toolSlug}`, {
-      waitUntil: 'networkidle',
+    await page.goto(`https://flow.google.com/tools/${toolSlug}`, {
+      waitUntil: 'load',
       timeout: 30000,
     });
     await page.waitForTimeout(2000);
