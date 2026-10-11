@@ -1,6 +1,7 @@
 import { get } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { takeScreenshot } from '../utils/screenshots.js';
+import { FlowError, ErrorCodes } from '../utils/errors.js';
 import { getPage } from './connect.js';
 
 const ACTION_DELAY = get('actionDelayMs', 800);
@@ -200,10 +201,12 @@ export async function dismissPopups(page) {
 export async function humanClick(page, locator) {
   await locator.scrollIntoViewIfNeeded().catch(() => {});
   const box = await locator.boundingBox();
-  if (!box) throw new Error('humanClick: element has no box (not visible)');
+  if (!box) throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE, 'humanClick: element has no box (not visible)');
   const x = box.x + box.width * (0.35 + Math.random() * 0.3);
   const y = box.y + box.height * (0.35 + Math.random() * 0.3);
-  await page.mouse.move(x - 40 - Math.random() * 80, y + 30 + Math.random() * 60);
+  const intermediateX = Math.max(0, x - 40 - Math.random() * 80);
+  const intermediateY = Math.max(0, y + 30 + Math.random() * 60);
+  await page.mouse.move(intermediateX, intermediateY);
   await page.mouse.move(x, y, { steps: 12 + Math.floor(Math.random() * 8) });
   await page.waitForTimeout(150 + Math.random() * 250);
   await page.mouse.click(x, y);

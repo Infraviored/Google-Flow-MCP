@@ -23,6 +23,7 @@ function firstString(node, test) {
 
 // Workflow row: [workflowId, null, null, [title, createTs, null, null, primaryMediaId, stepId, updateTs], projectId]
 function parseWorkflow(w) {
+  if (!Array.isArray(w)) return null;
   const meta = w[3] || [];
   return {
     editId: w[0],
@@ -35,6 +36,7 @@ function parseWorkflow(w) {
 
 // Media row: [mediaId, projectId, workflowId, null, null, [createTs, …, thumbUrl, [null,null,[[prompt,…]]], …], [[…, prompt, …], null, [w, h]]]
 function parseMedia(m) {
+  if (!Array.isArray(m)) return null;
   const info = m[6] || [];
   const dims = Array.isArray(info[2]) && info[2].length === 2 ? { width: info[2][0], height: info[2][1] } : null;
   const prompt = m[5]?.[6]?.[2]?.[0]?.[0] ?? info[0]?.[7] ?? null;
@@ -63,7 +65,7 @@ export async function listProjectsApi(page, { maxProjects = 250, pageSize = 100 
   let pageToken = null;
   do {
     const res = await rpc(page, 'UpteDb', ['projects/*', pageSize, pageToken, null, null, null, [1]]);
-    const batch = (res?.[0] || []).map(p => ({
+    const batch = (res?.[0] || []).filter(Array.isArray).map(p => ({
       id: p[0],
       name: p[1]?.[0] || null,
       createdAt: tsIso(p[1]?.[2]),
@@ -79,8 +81,8 @@ export async function listProjectsApi(page, { maxProjects = 250, pageSize = 100 
 export async function fetchProjectContents(page, projectId) {
   if (!projectId) throw new FlowError(ErrorCodes.INVALID_PARAMS, 'projectId is required to fetch project contents.');
   const res = await rpc(page, 'Zzl0ze', [`projects/${projectId}`, null, null, null, [1]]);
-  const generations = (res?.[1] || []).map(parseWorkflow);
-  const media = (res?.[2] || []).map(parseMedia);
+  const generations = (res?.[1] || []).map(parseWorkflow).filter(Boolean);
+  const media = (res?.[2] || []).map(parseMedia).filter(Boolean);
   logger.info('Fetched project contents from Flow', { projectId, workflows: generations.length, media: media.length });
   return { projectId, generations, media };
 }

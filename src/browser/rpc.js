@@ -56,7 +56,11 @@ export async function rpc(page, rpcId, args) {
         if (entry[2] == null) {
           throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE, `RPC ${rpcId} returned an error: ${JSON.stringify(entry).slice(0, 300)}`);
         }
-        return JSON.parse(entry[2]);
+        try {
+          return JSON.parse(entry[2]);
+        } catch (err) {
+          throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE, `RPC ${rpcId} returned malformed JSON payload: ${err.message}`);
+        }
       }
     }
   }

@@ -174,7 +174,7 @@ export async function handleGenerateImage(args) {
     await fillPrompt(page, promptInput, args.prompt);
     logger.info('Prompt filled', { promptLength: args.prompt.length });
 
-    // ⚠️ STEP 7: DECISION POINT — auto_confirm determines if we click Generate
+    // STEP 7: DECISION POINT — auto_confirm determines if we click Generate
     if (!autoConfirm) {
       // SAFE MODE: Setup only, no click. Return "ready_for_confirmation".
       const setupScreenshot = await takeScreenshot(page, 'image-ready-for-confirmation');
@@ -194,8 +194,8 @@ export async function handleGenerateImage(args) {
       return result;
     }
 
-    // 🛡️ SAFETY: Pre-generation screenshot verification
-    logger.info('⚠️ auto_confirm=true — vérifications de sécurité avant clic Generate');
+    // SAFETY: Pre-generation screenshot verification
+    logger.info('auto_confirm=true — safety checks before clicking Generate');
     const preGenScreenshot = await takeScreenshot(page, 'pre-generate-verification');
 
     // STEP 8: Find generate button (validated visible + enabled)
