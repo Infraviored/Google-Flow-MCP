@@ -165,6 +165,24 @@ Pick any `profile` label you like — it's just a directory name, no requirement
 
 Switching `profile` on a later call automatically closes whatever's running and relaunches under the requested one. Once a profile has a recorded `expectedAccount`, future connects under that same key verify against it and fail loud on a mismatch; a brand-new profile with nothing recorded yet just reports whichever account is found.
 
+#### Server without a screen
+
+Ask your agent to "create a profile" (or a second one). It calls `flow_login_start({ profile: "main" })`,
+which opens Chrome for that profile on a virtual display and serves it as a web page on
+`127.0.0.1:6080` (x11vnc + noVNC — `apt install xvfb x11vnc novnc websockify`). The agent hands you
+two things:
+
+```bash
+ssh -N -L 6080:127.0.0.1:6080 you@your-server     # on your own computer
+# then open http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+```
+
+Sign in to Google there (2FA included) and accept Flow's terms if asked. `flow_login_wait` notices the
+sign-in, records the account in `config.profiles`, and closes the viewer. From then on
+`flow_connect({ profile: "main", virtual_display: true })` runs without a screen. The viewer only ever
+listens on localhost; set `loginSshHost` in the config if the suggested ssh target is wrong
+(`loginWebPort` / `loginVncPort` change the ports).
+
 ### 5️⃣ Register with OpenCode
 
 ```bash

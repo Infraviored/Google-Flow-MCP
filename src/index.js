@@ -11,6 +11,7 @@ import { logger } from './utils/logger.js';
 import { launchKiaraProfile, navigateToFlow, getDefaultProfileKey, getProfileEntry, getAllProfiles } from './browser/launch-profile.js';
 import { getPage, getBrowser, setBrowser, closeBrowser as closeBrowserConnection, getActiveProfileKey, getLaunchMode } from './browser/connect.js';
 import { verifyAccount as checkAccount } from './browser/account-check.js';
+import { startRemoteLogin, waitRemoteLogin, cancelRemoteLogin } from './browser/remote-login.js';
 import { updateConfig } from './utils/config.js';
 import { handleFlowStatus } from './tools/flow-status.js';
 import { handleGenerateImage } from './tools/generate-image.js';
@@ -52,6 +53,34 @@ const TOOL_DEFINITIONS = [
         source_profile: { type: 'string', description: 'Seed a new profile from an existing signed-in system Chrome profile directory, e.g. "Default".' },
       },
     },
+  },
+  {
+    name: 'flow_login_start',
+    description: 'Set up a Google account on a machine without a screen ("create a profile"). Opens Chrome for that profile and serves it as a web page; returns the link and an ssh tunnel command for the user. Then call flow_login_wait.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        profile: { type: 'string', description: 'Label for the new profile, e.g. "main" or "second". One per Google account.' },
+      },
+      required: ['profile'],
+    },
+  },
+  {
+    name: 'flow_login_wait',
+    description: 'Wait until the user has signed in through flow_login_start; on success records the account for the profile and closes the viewer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        profile: { type: 'string', description: 'Same label as in flow_login_start.' },
+        timeout_sec: { type: 'number', description: 'How long to wait in this call. Default 240.', default: 240 },
+      },
+      required: ['profile'],
+    },
+  },
+  {
+    name: 'flow_login_cancel',
+    description: 'Stop a running flow_login_start viewer.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'flow_disconnect',
@@ -290,7 +319,8 @@ async function handleToolCall(name, args) {
           status: 'oauth_required',
           message: `Google sign-in needed in the persistent profile (chrome-profile-${profileKey}/) — this only ever `
             + 'happens once per profile, then every future flow_connect with the same profile reuses the saved '
-            + 'session automatically. This step needs a VISIBLE window: if this call used virtual_display=true or '
+            + 'session automatically. On a machine without a screen use flow_login_start/flow_login_wait instead. '
+            + 'Otherwise this step needs a VISIBLE window: if this call used virtual_display=true or '
             + 'headless=true, retry with both false so a human can see and complete it, then future calls can go '
             + 'back to any mode. Ask the user to: 1) look at the Chrome window, 2) pick their Google account (and '
             + 'complete 2FA if prompted), 3) retry this tool once signed in.',
@@ -306,6 +336,20 @@ async function handleToolCall(name, args) {
         url: page.url(),
         accountVerified: accountCheck,
       }, null, 2) }] };
+    }
+
+    case 'flow_login_start': {
+      const result = await startRemoteLogin({ profile: args.profile });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_login_wait': {
+      const result = await waitRemoteLogin({ profile: args.profile, timeoutSec: args?.timeout_sec ?? 240 });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+
+    case 'flow_login_cancel': {
+      return { content: [{ type: 'text', text: JSON.stringify(cancelRemoteLogin()) }] };
     }
 
     case 'flow_disconnect': {
