@@ -429,8 +429,7 @@ async function clickCreateAndWait(page, instruction, timeoutMs) {
 
   // An edit can return more than one variant (the composer's xN setting);
   // they land a few seconds apart, so settle briefly after the first.
-  let fresh = (await waitForNewProjectMedia(page, projectId, baseline, { expected: 1, timeoutMs }))
-    .filter(m => m.editId === editId);
+  let fresh = await waitForNewProjectMedia(page, projectId, baseline, { expected: 1, editId, timeoutMs });
   if (fresh.length) {
     await page.waitForTimeout(8000);
     const { media } = await fetchProjectContents(page, projectId);

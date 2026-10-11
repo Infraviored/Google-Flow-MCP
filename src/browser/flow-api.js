@@ -114,7 +114,7 @@ export async function mediaIdsOfProject(page, projectId) {
 // here is downloadable. If fewer than expected show up (a blocked or failed
 // output), return what arrived once the count has been stable for `settleMs`.
 export async function waitForNewProjectMedia(page, projectId, baseline, {
-  expected = 1, kind = null, timeoutMs = 180000, pollMs = 4000, settleMs = 30000,
+  expected = 1, kind = null, editId = null, timeoutMs = 180000, pollMs = 4000, settleMs = 30000,
 } = {}) {
   const start = Date.now();
   // Flow's reCAPTCHA rejection shows as a "Failed" card, not in the API:
@@ -132,7 +132,7 @@ export async function waitForNewProjectMedia(page, projectId, baseline, {
         'Wait a few minutes and retry; repeated rejections mean the session needs a break.');
     }
     const { media, generations } = await fetchProjectContents(page, projectId).catch(() => ({ media: [], generations: [] }));
-    fresh = media.filter(m => !baseline.has(m.mediaId) && (!kind || m.kind === kind));
+    fresh = media.filter(m => !baseline.has(m.mediaId) && (!kind || m.kind === kind) && (!editId || m.editId === editId));
     for (const m of fresh) m.title = generations.find(g => g.editId === m.editId)?.title || null;
     if (fresh.length !== lastCount) { lastCount = fresh.length; lastChange = Date.now(); }
     if (fresh.length >= expected) break;
