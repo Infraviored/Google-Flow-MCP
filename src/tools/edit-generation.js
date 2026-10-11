@@ -27,7 +27,7 @@ export async function handleEditGeneration(args = {}) {
   } else if (!/\/edit\//.test(page.url())) {
     throw new FlowError(ErrorCodes.UNKNOWN_UI_CHANGE,
       'Not on a generation\'s /edit/ page and no id/url given — call with an id (from flow_list_generations) ' +
-      'or flow_open_generation first.');
+      'or provide a generation url.');
   }
 
   const autoConfirm = args.auto_confirm === true;
