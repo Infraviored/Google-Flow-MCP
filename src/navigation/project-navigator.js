@@ -191,6 +191,24 @@ export async function ensureProjectInContext(page, context = {}) {
         saveProjects(store);
         return await enterProject(match);
       }
+
+      // Direct navigation fallback: if the project is older or beyond pagination limits,
+      // navigate directly to verify if it exists.
+      const targetUrl = `https://flow.google.com/project/${context.project_id}`;
+      logger.info('Project id not in listed projects, trying direct URL navigation', { id: context.project_id, targetUrl });
+      await page.goto(targetUrl, { waitUntil: 'load', timeout: 30000 });
+      await page.waitForTimeout(2000);
+      await recoverFromCrash(page);
+      await dismissPopups(page);
+      if (projectIdFromUrl(page.url()) === context.project_id) {
+        const title = (await page.locator('input[aria-label="Editable text"]').inputValue().catch(() => null)) || context.project_id;
+        const store = loadProjects();
+        store.projects = store.projects.filter(p => p.id !== context.project_id);
+        store.projects.push({ id: context.project_id, name: title, url: targetUrl, last_used: new Date().toISOString() });
+        saveProjects(store);
+        return { url: targetUrl, id: context.project_id, name: title, reused: false };
+      }
+
       throw new FlowError(ErrorCodes.CONFIG_ERROR,
         `Project id "${context.project_id}" not found in the workspace. ` +
         `Available: ${live.map(p => `${p.name} (${p.id})`).join(', ') || 'none'}`);

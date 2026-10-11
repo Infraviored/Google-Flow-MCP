@@ -58,15 +58,22 @@ export function projectIdFromUrl(url) {
   return url.split('/project/')[1]?.split(/[/?#]/)[0] || null;
 }
 
-export async function listProjectsApi(page) {
-  const res = await rpc(page, 'UpteDb', ['projects/*', 21, null, null, null, null, [1]]);
-  return (res?.[0] || []).map(p => ({
-    id: p[0],
-    name: p[1]?.[0] || null,
-    createdAt: tsIso(p[1]?.[2]),
-    thumbnail_url: p[1]?.[3] || null,
-    url: `https://flow.google.com/project/${p[0]}`,
-  }));
+export async function listProjectsApi(page, { maxProjects = 250, pageSize = 100 } = {}) {
+  let projects = [];
+  let pageToken = null;
+  do {
+    const res = await rpc(page, 'UpteDb', ['projects/*', pageSize, pageToken, null, null, null, [1]]);
+    const batch = (res?.[0] || []).map(p => ({
+      id: p[0],
+      name: p[1]?.[0] || null,
+      createdAt: tsIso(p[1]?.[2]),
+      thumbnail_url: p[1]?.[3] || null,
+      url: `https://flow.google.com/project/${p[0]}`,
+    }));
+    projects = projects.concat(batch);
+    pageToken = typeof res?.[1] === 'string' && res[1].length > 0 ? res[1] : null;
+  } while (pageToken && projects.length < maxProjects);
+  return projects;
 }
 
 export async function fetchProjectContents(page, projectId) {
